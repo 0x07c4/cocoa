@@ -22,9 +22,13 @@ PYTHONPATH=src python -m cocoa doctor
 PYTHONPATH=src python -m cocoa inspect .
 PYTHONPATH=src python -m cocoa ask "summarize this workspace"
 PYTHONPATH=src python -m cocoa repl
+PYTHONPATH=src python -m cocoa repl  # explicitly start repl
 
 # Or just enter an interactive 会话 directly:
 PYTHONPATH=src python -m cocoa
+
+# 在 REPL 里查看 provider：
+# /provider   show current provider and model
 ```
 
 State is written under `.cocoa/` in the selected workspace.

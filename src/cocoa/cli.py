@@ -106,6 +106,13 @@ def print_inspect(cwd: Path, path: str, max_entries: int) -> None:
         print(f"... capped at {max_entries} entries")
 
 
+def _resolve_provider_status() -> str:
+    try:
+        return provider_name_from_env()
+    except ProviderConfigurationError as exc:
+        return f"not configured ({exc})"
+
+
 async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
     runtime, store = make_runtime(cwd)
     if thread_id is None:
@@ -129,6 +136,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
 
     print(f"cocoa {__version__}")
     print(f"thread: {thread.id}")
+    print(f"provider: {_resolve_provider_status()}")
     print("type /help for commands, /exit to quit")
 
     while True:
@@ -145,6 +153,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
         if line == "/help":
             print("/help               show commands")
             print("/status             show session status")
+            print("/provider           show provider status")
             print("/inspect [path]     list workspace files")
             print("/run <command>      run shell command after approval")
             print("/exit               quit")
@@ -153,6 +162,9 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             print(f"thread: {thread.id}")
             print(f"cwd: {cwd}")
             print(f"log: {store.thread_path(thread.id)}")
+            continue
+        if line == "/provider":
+            print(f"provider: {_resolve_provider_status()}")
             continue
         if line.startswith("/inspect"):
             _, _, raw_path = line.partition(" ")
