@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
+from typing import Mapping
 
 from . import __version__
-from .providers import ProviderConfigurationError, StubProvider, provider_from_env, provider_name_from_env
+from .providers import (
+    ProviderConfigurationError,
+    StubProvider,
+    provider_from_env,
+    provider_name_from_env,
+)
 from .runtime import AgentRuntime
 from .store import JsonlStore
 from .tools import ConsoleApprovalPrompter, ShellTool
@@ -56,6 +64,97 @@ def positive_int(raw: str) -> int:
     return value
 
 
+def _parse_config_lines(raw: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for line in raw.splitlines():
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        if "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if not value:
+            env[key] = ""
+            continue
+        try:
+            tokens = shlex.split(value)
+        except ValueError:
+            env[key] = value.strip("'\"")
+        else:
+            if len(tokens) == 0:
+                env[key] = ""
+            elif len(tokens) == 1:
+                env[key] = tokens[0]
+            else:
+                env[key] = value
+    return env
+
+
+def _load_config_env(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    try:
+        return _parse_config_lines(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+
+
+def _effective_environment(cwd: Path) -> dict[str, str]:
+    home = Path.home()
+    env = dict(os.environ)
+    env.update(_load_config_env(home / ".cocoa" / "config.env"))
+    env.update(_load_config_env(cwd / ".cocoa" / "config.env"))
+    return env
+
+
+def _serialize_env_value(value: str) -> str:
+    if value == "":
+        return "\"\""
+    if any(ch.isspace() for ch in value):
+        return shlex.quote(value)
+    return value
+
+
+def _persist_environment(cwd: Path, updates: Mapping[str, str]) -> None:
+    path = cwd / ".cocoa" / "config.env"
+    existing = _load_config_env(path)
+    existing.update(updates)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"{key}={_serialize_env_value(value)}" for key, value in sorted(existing.items())
+    ]
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def _effective_session_environment(
+    cwd: Path,
+    overrides: Mapping[str, str],
+) -> dict[str, str]:
+    env = _effective_environment(cwd)
+    env.update(overrides)
+    return env
+
+
+def _resolve_runtime_from_env(cwd: Path, overrides: Mapping[str, str]) -> tuple[
+    AgentRuntime,
+    JsonlStore,
+    str,
+]:
+    env = _effective_session_environment(cwd, overrides)
+    store = JsonlStore.for_workspace(cwd)
+    try:
+        provider_status = _resolve_provider_status_for_env(env)
+        provider = provider_from_env(env)
+    except ProviderConfigurationError as exc:
+        provider_status = f"not configured ({exc})"
+        provider = StubProvider()
+    return AgentRuntime(store=store, provider=provider), store, provider_status
+
+
 def resolve_cwd(raw: str) -> Path:
     cwd = Path(raw).expanduser().resolve()
     if not cwd.exists():
@@ -67,12 +166,13 @@ def resolve_cwd(raw: str) -> Path:
 
 def make_runtime(cwd: Path) -> tuple[AgentRuntime, JsonlStore]:
     store = JsonlStore.for_workspace(cwd)
-    return AgentRuntime(store=store, provider=provider_from_env()), store
+    env = _effective_environment(cwd)
+    return AgentRuntime(store=store, provider=provider_from_env(env)), store
 
 
 def print_doctor(cwd: Path) -> None:
     try:
-        provider_name = provider_name_from_env()
+        provider_name = provider_name_from_env(_effective_environment(cwd))
     except ProviderConfigurationError as exc:
         provider_name = f"not configured ({exc})"
     git_root = None
@@ -106,15 +206,21 @@ def print_inspect(cwd: Path, path: str, max_entries: int) -> None:
         print(f"... capped at {max_entries} entries")
 
 
-def _resolve_provider_status() -> str:
+def _resolve_provider_status(env: Mapping[str, str] | None = None) -> str:
+    # keep backwards compatibility for callers that pass no env
+    source = dict(os.environ) if env is None else dict(env)
+    return _resolve_provider_status_for_env(source)
+
+
+def _resolve_provider_status_for_env(env: Mapping[str, str]) -> str:
     try:
-        return provider_name_from_env()
+        return provider_name_from_env(env)
     except ProviderConfigurationError as exc:
         return f"not configured ({exc})"
 
 
-def _resolve_provider_model() -> str:
-    status = _resolve_provider_status()
+def _resolve_provider_model(env: Mapping[str, str] | None = None) -> str:
+    status = _resolve_provider_status(env)
     if status == "stub" or status.startswith("not configured ("):
         return "unknown"
     index = status.find(":")
@@ -123,9 +229,20 @@ def _resolve_provider_model() -> str:
     return "default"
 
 
-def _is_provider_configured() -> bool:
-    status = _resolve_provider_status()
+def _resolve_provider_model_for_env(env: Mapping[str, str]) -> str:
+    status = _resolve_provider_status_for_env(env)
+    if status == "stub" or status.startswith("not configured ("):
+        return "unknown"
+    index = status.find(":")
+    if index >= 0:
+        return status[index + 1 :]
+    return "default"
+
+
+def _is_provider_configured(env: Mapping[str, str] | None = None) -> bool:
+    status = _resolve_provider_status(env)
     return status != "stub" and not status.startswith("not configured (")
+
 
 
 def _print_provider_config_help() -> None:
@@ -157,13 +274,21 @@ async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
 
 
 async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
-    try:
-        runtime, store = make_runtime(cwd)
-        provider_status = _resolve_provider_status()
-    except ProviderConfigurationError as exc:
-        provider_status = f"not configured ({exc})"
-        store = JsonlStore.for_workspace(cwd)
-        runtime = AgentRuntime(store=store, provider=StubProvider())
+    overrides: dict[str, str] = {}
+    runtime, store, provider_status = _resolve_runtime_from_env(cwd, overrides)
+
+    def print_provider_status() -> None:
+        print(f"provider: {_resolve_provider_status_for_env(_effective_session_environment(cwd, overrides))}")
+
+    def rebuild_runtime() -> None:
+        nonlocal runtime, provider_status
+        runtime, _, provider_status = _resolve_runtime_from_env(cwd, overrides)
+
+    def set_and_reload_env(key: str, value: str) -> None:
+        overrides[key] = value
+        rebuild_runtime()
+
+    env = _effective_session_environment(cwd, overrides)
     if thread_id is None:
         thread = runtime.start_thread(cwd, title="repl")
     else:
@@ -173,7 +298,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
     print(f"cocoa {__version__}")
     print(f"thread: {thread.id}")
     print(f"provider: {provider_status}")
-    if not _is_provider_configured():
+    if not _is_provider_configured(env):
         print("provider not ready, type /configure for setup, /help for commands")
     print("type /help for commands, /exit to quit")
 
@@ -193,7 +318,8 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             print("/status             show session status")
             print("/provider           show provider status")
             print("/model              show model selection")
-            print("/configure          show provider setup examples")
+            print("/configure          configure provider in session or save config")
+            print("/set KEY VALUE      set session variable and apply immediately")
             print("/inspect [path]     list workspace files")
             print("/run <command>      run shell command after approval")
             print("/exit               quit")
@@ -201,16 +327,80 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
         if line == "/configure":
             _print_provider_config_help()
             continue
+        if line.startswith("/configure "):
+            _, _, raw = line.partition(" ")
+            args = shlex.split(raw)
+            if not args:
+                print("usage: /configure <openai|codex-http|codex> <args...>")
+                continue
+            mode = args[0].lower()
+            if mode == "openai":
+                if len(args) < 3:
+                    print("usage: /configure openai <api_key> <model> [base_url]")
+                    continue
+                updates = {"COCOA_PROVIDER": "openai", "COCOA_OPENAI_API_KEY": args[1], "COCOA_OPENAI_MODEL": args[2]}
+                if len(args) > 3:
+                    updates["COCOA_OPENAI_BASE_URL"] = args[3]
+                _persist_environment(cwd, updates)
+                overrides.clear()
+                rebuild_runtime()
+                env = _effective_session_environment(cwd, overrides)
+                print("provider config persisted to .cocoa/config.env")
+                print_provider_status()
+                continue
+            if mode == "codex-http":
+                updates = {"COCOA_PROVIDER": "codex-http"}
+                if len(args) > 1:
+                    updates["COCOA_CODEX_MODEL"] = args[1]
+                    if len(args) > 2:
+                        updates["COCOA_CODEX_API_KEY"] = args[2]
+                _persist_environment(cwd, updates)
+                overrides.clear()
+                rebuild_runtime()
+                env = _effective_session_environment(cwd, overrides)
+                print("provider config persisted to .cocoa/config.env")
+                print_provider_status()
+                continue
+            if mode == "clear":
+                _persist_environment(cwd, {"COCOA_PROVIDER": ""})
+                overrides.clear()
+                rebuild_runtime()
+                env = _effective_session_environment(cwd, overrides)
+                print("provider override cleared in workspace config")
+                continue
+            print("unknown /configure mode. use openai | codex-http | clear")
+            continue
+        if line.startswith("/set "):
+            _, _, raw = line.partition(" ")
+            if "=" in raw:
+                key, value = raw.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+            else:
+                tokens = shlex.split(raw)
+                if len(tokens) < 2:
+                    print("usage: /set KEY VALUE")
+                    continue
+                key = tokens[0]
+                value = tokens[1]
+            if not key:
+                print("missing variable name")
+                continue
+            set_and_reload_env(key, value)
+            env = _effective_session_environment(cwd, overrides)
+            print(f"{key} set")
+            print_provider_status()
+            continue
         if line == "/status":
             print(f"thread: {thread.id}")
             print(f"cwd: {cwd}")
             print(f"log: {store.thread_path(thread.id)}")
             continue
         if line == "/provider":
-            print(f"provider: {_resolve_provider_status()}")
+            print(f"provider: {_resolve_provider_status_for_env(env)}")
             continue
         if line == "/model":
-            print(f"model: {_resolve_provider_model()}")
+            print(f"model: {_resolve_provider_model_for_env(env)}")
             continue
         if line.startswith("/inspect"):
             _, _, raw_path = line.partition(" ")

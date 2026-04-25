@@ -26,19 +26,26 @@ PYTHONPATH=src python -m cocoa repl  # explicitly start repl
 
 # Or just enter an interactive 会话 directly:
 PYTHONPATH=src python -m cocoa
+```
+
+会话内可直接配置真实 provider（免重复导出环境变量）：
+
+```sh
+PYTHONPATH=src python -m cocoa repl
+
+```
+
+在 REPL 中直接输入：
+- `/configure openai <api_key> <model> [base_url]`
+- `/configure codex-http [model]`
+- `/set KEY VALUE`（仅本会话生效；支持 `KEY=VALUE`）
+
+`/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
+
+`/provider` 会显示当前 provider，`/model` 会显示模型（未就绪时显示 `unknown`）。
 
 Note:
 - If a valid codex auth token is available in COCOA_CODEX_API_KEY/CODEX auth file, cocoa will auto-select `codex-http` on first start.
-
-# 在 REPL 里查看 provider：
-# /provider   show current provider and model
-
-# 在 REPL 里也可以单独查看模型：
-# /model      show selected model (or unknown when not configured)
-
-# 快速配置：
-# /configure  print provider setup snippets in REPL
-```
 
 State is written under `.cocoa/` in the selected workspace.
 
