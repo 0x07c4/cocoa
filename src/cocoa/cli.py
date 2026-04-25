@@ -113,6 +113,16 @@ def _resolve_provider_status() -> str:
         return f"not configured ({exc})"
 
 
+def _resolve_provider_model() -> str:
+    status = _resolve_provider_status()
+    if status == "stub" or status.startswith("not configured ("):
+        return "unknown"
+    index = status.find(":")
+    if index >= 0:
+        return status[index + 1 :]
+    return "default"
+
+
 async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
     runtime, store = make_runtime(cwd)
     if thread_id is None:
@@ -154,6 +164,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             print("/help               show commands")
             print("/status             show session status")
             print("/provider           show provider status")
+            print("/model              show model selection")
             print("/inspect [path]     list workspace files")
             print("/run <command>      run shell command after approval")
             print("/exit               quit")
@@ -165,6 +176,9 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             continue
         if line == "/provider":
             print(f"provider: {_resolve_provider_status()}")
+            continue
+        if line == "/model":
+            print(f"model: {_resolve_provider_model()}")
             continue
         if line.startswith("/inspect"):
             _, _, raw_path = line.partition(" ")

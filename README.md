@@ -29,6 +29,9 @@ PYTHONPATH=src python -m cocoa
 
 # 在 REPL 里查看 provider：
 # /provider   show current provider and model
+
+# 在 REPL 里也可以单独查看模型：
+# /model      show selected model (or unknown when not configured)
 ```
 
 State is written under `.cocoa/` in the selected workspace.
