@@ -79,9 +79,17 @@ Optional Codex CLI bridge mapping:
 Optional Codex HTTP env:
 
 - `COCOA_CODEX_API_KEY` (recommended)
+- `COCOA_CODEX_HOME` (optional, default `~/.codex`) to locate `auth.json`
+- `CODEX_API_KEY` (legacy CLI-compatible fallback)
 - `COCOA_CODEX_BASE_URL` (defaults to `https://chatgpt.com/backend-api/codex`)
 - `COCOA_CODEX_TEMPERATURE`
 - `COCOA_CODEX_MAX_TOKENS`
+
+`cocoa` also auto-discovers a valid token from `${COCOA_CODEX_HOME:-$CODEX_HOME:-~/.codex}/auth.json` when `COCOA_CODEX_API_KEY` is not set. `auth.json` must contain:
+
+```json
+{ "tokens": { "access_token": "..." } }
+```
 
 `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` are accepted as
 fallbacks when `COCOA_PROVIDER=openai`. The provider only returns model text;

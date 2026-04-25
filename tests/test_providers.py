@@ -6,6 +6,7 @@ import os
 from io import BytesIO
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -258,6 +259,55 @@ class ProviderTests(unittest.TestCase):
         provider = provider_from_env(env)
         self.assertEqual(provider.__class__.__name__, "CodexResponsesProvider")
         self.assertEqual(provider_name_from_env(env), "codex-http:gpt-5-codex")
+
+    def test_provider_env_builds_codex_http_provider_from_auth_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            codex_home.mkdir(parents=True)
+            (codex_home / "auth.json").write_text(
+                '{"tokens":{"access_token":"cli-token","refresh_token":"cli-refresh"}}',
+                encoding="utf-8",
+            )
+
+            env = {
+                "COCOA_PROVIDER": "codex-http",
+                "COCOA_CODEX_MODEL": "codex-model",
+                "COCOA_CODEX_HOME": str(codex_home),
+            }
+            provider = provider_from_env(env)
+
+            self.assertEqual(provider.__class__.__name__, "CodexResponsesProvider")
+            self.assertEqual(provider_name_from_env(env), "codex-http:codex-model")
+
+    def test_provider_env_builds_codex_http_provider_from_alias_with_auth_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            codex_home.mkdir(parents=True)
+            (codex_home / "auth.json").write_text(
+                '{"tokens":{"access_token":"cli-token","refresh_token":"cli-refresh"}}',
+                encoding="utf-8",
+            )
+
+            env = {
+                "COCOA_PROVIDER": "openai-codex",
+                "COCOA_CODEX_MODEL": "gpt-5-codex",
+                "COCOA_CODEX_HOME": str(codex_home),
+            }
+            provider = provider_from_env(env)
+
+            self.assertEqual(provider.__class__.__name__, "CodexResponsesProvider")
+            self.assertEqual(provider_name_from_env(env), "codex-http:gpt-5-codex")
+
+    def test_provider_env_reports_missing_codex_http_token(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            env = {
+                "COCOA_PROVIDER": "codex-http",
+                "COCOA_CODEX_MODEL": "codex-model",
+                "COCOA_CODEX_HOME": str(Path(tmpdir) / "codex-missing"),
+            }
+
+            with self.assertRaisesRegex(ProviderConfigurationError, "missing"):
+                provider_from_env(env)
 
     def test_codex_responses_provider_calls_responses_endpoint(self) -> None:
         captured: dict[str, object] = {}

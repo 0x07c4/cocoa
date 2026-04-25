@@ -1,14 +1,94 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
+from pathlib import Path
 import subprocess
 import urllib.error
 import urllib.request
+import time
 from dataclasses import dataclass
 from typing import Any
 from typing import Mapping
 from typing import Protocol
+
+
+_CODEX_JWT_REFRESH_SKEW_SECONDS = 120
+
+
+def _codex_home_from_env(env: Mapping[str, str]) -> Path:
+    raw = (
+        env.get("COCOA_CODEX_HOME")
+        or env.get("CODEX_HOME")
+        or str(Path.home() / ".codex")
+    )
+    raw = str(raw).strip()
+    return Path(raw).expanduser()
+
+
+def _read_jwt_expiry_seconds(token: str) -> float | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = base64.urlsafe_b64decode(
+            parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+        )
+        claims = json.loads(payload.decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    exp = claims.get("exp")
+    try:
+        return float(exp)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_jwt_expired(token: str, *, skew_seconds: int = 0) -> bool:
+    exp = _read_jwt_expiry_seconds(token)
+    if exp is None:
+        return False
+    return exp <= (time.time() + max(0, int(skew_seconds)))
+
+
+def _read_codex_auth_token(codex_home: Path) -> str | None:
+    auth_path = codex_home / "auth.json"
+    if not auth_path.is_file():
+        return None
+    try:
+        payload = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    access_token = tokens.get("access_token")
+    if not isinstance(access_token, str) or not access_token.strip():
+        return None
+    cleaned = access_token.strip()
+    if _is_jwt_expired(cleaned, skew_seconds=_CODEX_JWT_REFRESH_SKEW_SECONDS):
+        return None
+    return cleaned
+
+
+def _resolve_codex_api_key(env: Mapping[str, str]) -> str | None:
+    codex_home = _codex_home_from_env(env)
+    api_key = (
+        env.get("COCOA_CODEX_API_KEY")
+        or env.get("OPENAI_API_KEY")
+        or env.get("OPENAI_TOKEN")
+        or env.get("CODEX_API_KEY")
+    )
+    if api_key:
+        cleaned = str(api_key).strip()
+        if cleaned:
+            return cleaned
+    return _read_codex_auth_token(codex_home)
 
 
 @dataclass(frozen=True)
@@ -98,16 +178,17 @@ class CodexResponsesConfig:
         if provider not in {"codex-http", "codex-responses", "openai-codex"}:
             return None
 
-        api_key = (
-            env.get("COCOA_CODEX_API_KEY")
-            or env.get("OPENAI_API_KEY")
-            or env.get("OPENAI_API_TOKEN")
-        )
+        api_key = _resolve_codex_api_key(env)
         model = env.get("COCOA_CODEX_MODEL") or env.get("OPENAI_MODEL")
         if not api_key or not model:
             missing = []
             if not api_key:
-                missing.append("COCOA_CODEX_API_KEY or OPENAI_API_KEY")
+                codex_home = _codex_home_from_env(env)
+                auth_path = codex_home / "auth.json"
+                missing.append(
+                    "COCOA_CODEX_API_KEY or OPENAI_API_KEY or OPENAI_TOKEN or CODEX_API_KEY "
+                    f"or a valid token in {auth_path}"
+                )
             if not model:
                 missing.append("COCOA_CODEX_MODEL or OPENAI_MODEL")
             raise ProviderConfigurationError("missing " + ", ".join(missing))
