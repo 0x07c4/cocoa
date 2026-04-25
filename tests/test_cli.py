@@ -4,7 +4,12 @@ import os
 import unittest
 from unittest import mock
 
-from cocoa.cli import _resolve_provider_model, _resolve_provider_status, build_parser
+from cocoa.cli import (
+    _is_provider_configured,
+    _resolve_provider_model,
+    _resolve_provider_status,
+    build_parser,
+)
 
 
 class CliTests(unittest.TestCase):
@@ -24,6 +29,10 @@ class CliTests(unittest.TestCase):
             status = _resolve_provider_status()
         self.assertTrue(status.startswith("not configured ("))
         self.assertIn("missing", status)
+
+    def test_provider_not_configured_by_default(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(_is_provider_configured())
 
     def test_provider_model_unknown_by_default(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):

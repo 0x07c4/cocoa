@@ -32,6 +32,9 @@ PYTHONPATH=src python -m cocoa
 
 # 在 REPL 里也可以单独查看模型：
 # /model      show selected model (or unknown when not configured)
+
+# 快速配置：
+# /configure  print provider setup snippets in REPL
 ```
 
 State is written under `.cocoa/` in the selected workspace.

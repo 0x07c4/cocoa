@@ -123,6 +123,26 @@ def _resolve_provider_model() -> str:
     return "default"
 
 
+def _is_provider_configured() -> bool:
+    status = _resolve_provider_status()
+    return status != "stub" and not status.startswith("not configured (")
+
+
+def _print_provider_config_help() -> None:
+    print("provider is not configured.")
+    print("Run one of these and restart cocoa:")
+    print("")
+    print("# OpenAI-compatible")
+    print("export COCOA_PROVIDER=openai")
+    print("export COCOA_OPENAI_API_KEY=\"<YOUR_KEY>\"")
+    print("export COCOA_OPENAI_MODEL=\"gpt-5\"")
+    print("")
+    print("# Codex HTTP (if logged in ChatGPT)")
+    print("export COCOA_PROVIDER=codex-http")
+    print("export COCOA_CODEX_BASE_URL=\"https://chatgpt.com/backend-api/codex\"")
+    print("python -m cocoa")
+
+
 async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
     runtime, store = make_runtime(cwd)
     if thread_id is None:
@@ -146,7 +166,10 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
 
     print(f"cocoa {__version__}")
     print(f"thread: {thread.id}")
-    print(f"provider: {_resolve_provider_status()}")
+    provider_status = _resolve_provider_status()
+    print(f"provider: {provider_status}")
+    if not _is_provider_configured():
+        print("provider not ready, type /configure for setup, /help for commands")
     print("type /help for commands, /exit to quit")
 
     while True:
@@ -165,9 +188,13 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             print("/status             show session status")
             print("/provider           show provider status")
             print("/model              show model selection")
+            print("/configure          show provider setup examples")
             print("/inspect [path]     list workspace files")
             print("/run <command>      run shell command after approval")
             print("/exit               quit")
+            continue
+        if line == "/configure":
+            _print_provider_config_help()
             continue
         if line == "/status":
             print(f"thread: {thread.id}")
@@ -196,6 +223,9 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
             if result.exit_code is not None:
                 print(f"exit_code: {result.exit_code}")
+            continue
+        if line.startswith("/"):
+            print("unknown command. type /help for commands.")
             continue
 
         message = await runtime.run_user_turn(thread, line)
