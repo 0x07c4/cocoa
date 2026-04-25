@@ -96,6 +96,48 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn("item", captured["payload"])
         self.assertNotIn("event", captured["payload"])
 
+    def test_openai_provider_includes_thread_context(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(request, timeout: float):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeHTTPResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "provider ok",
+                            }
+                        }
+                    ]
+                }
+            )
+
+        config = OpenAICompatibleConfig(
+            api_key="test-key",
+            model="test-model",
+            base_url="http://provider.example/v1",
+        )
+        provider = OpenAICompatibleProvider(config)
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            asyncio.run(
+                provider.complete(
+                    ProviderRequest(
+                        thread_id="thr_ctx",
+                        turn_id="turn_ctx",
+                        prompt="new question",
+                        cwd="/tmp/project",
+                        thread_context="User: first\nAssistant: done",
+                    )
+                )
+            )
+
+        payload = captured["payload"]  # type: ignore[assignment]
+        self.assertIn("Recent thread context:", str(payload["messages"][1]["content"]))
+        self.assertIn("User: first", str(payload["messages"][1]["content"]))
+
     def test_provider_rejects_missing_text_content(self) -> None:
         provider = OpenAICompatibleProvider(
             OpenAICompatibleConfig(api_key="key", model="model")
@@ -239,6 +281,13 @@ class ProviderTests(unittest.TestCase):
                 codex_home="/tmp/cocoa-codex-home",
             )
         )
+        request = ProviderRequest(
+            thread_id="thr_codex",
+            turn_id="turn_codex",
+            prompt="hello codex",
+            cwd="/tmp/project",
+            thread_context="User: first\nAssistant: done",
+        )
 
         with patch("subprocess.run", fake_run):
             response = asyncio.run(provider.complete(request))
@@ -255,6 +304,7 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("/tmp/project", args)  # type: ignore[arg-type]
         self.assertIn("Workspace: /tmp/project", str(args[-1]))  # type: ignore[arg-type]
         self.assertEqual(captured["timeout"], 4.0)  # type: ignore[comparison-overlap]
+        self.assertIn("Recent thread context:", str(args[-1]))  # type: ignore[arg-type]
 
         command_env = captured["env"]  # type: ignore[assignment]
         self.assertEqual(command_env.get("CODEX_HOME"), "/tmp/cocoa-codex-home")
@@ -291,6 +341,62 @@ class ProviderTests(unittest.TestCase):
                     )
                 )
 
+    def test_codex_provider_retries_without_ask_for_approval(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(
+            args: list[str],
+            env: dict[str, str],
+            check: bool,
+            capture_output: bool,
+            text: bool,
+            timeout: float,
+        ) -> FakeCompletedProcess:
+            calls.append(args)
+            if len(calls) == 1:
+                return FakeCompletedProcess(
+                    2,
+                    stdout="",
+                    stderr="error: unknown option '--ask-for-approval'",
+                )
+            return FakeCompletedProcess(
+                0,
+                stdout="\n".join(
+                    [
+                        '{"type":"item.completed","item":{"id":"item_0","details":'
+                        '{"type":"agent_message","text":"from codex"}}}'
+                    ]
+                )
+                + "\n",
+            )
+
+        provider = CodexProvider(
+            CodexConfig(
+                binary="codex-test",
+                model="codex-model",
+                timeout_seconds=4.0,
+                sandbox="read-only",
+                ask_for_approval="on-request",
+                codex_home="/tmp/cocoa-codex-home",
+            )
+        )
+
+        with patch("subprocess.run", fake_run):
+            response = asyncio.run(
+                provider.complete(
+                    ProviderRequest(
+                        thread_id="thr_codex",
+                        turn_id="turn_codex",
+                        prompt="retry",
+                        cwd="/tmp/project",
+                    )
+                )
+            )
+
+        self.assertEqual(response.message, "from codex")
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertIn("--ask-for-approval", calls[0])
+        self.assertNotIn("--ask-for-approval", calls[1])
 
 if __name__ == "__main__":
     unittest.main()

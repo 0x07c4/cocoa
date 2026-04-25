@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cocoa.providers import StubProvider
+from cocoa.providers import ProviderRequest, ProviderResponse, StubProvider
 from cocoa.runtime import AgentRuntime
 from cocoa.store import JsonlStore
 from cocoa.tools import AlwaysApprovePrompter, AlwaysRejectPrompter, ShellTool
@@ -15,6 +15,18 @@ from cocoa.tools import AlwaysApprovePrompter, AlwaysRejectPrompter, ShellTool
 class FailingProvider:
     async def complete(self, request):
         raise RuntimeError("provider exploded")
+
+
+class CapturingProvider:
+    def __init__(self) -> None:
+        self.requests: list[ProviderRequest] = []
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        self.requests.append(request)
+        return ProviderResponse(
+            message=f"echo:{request.prompt}",
+            summary="captured",
+        )
 
 
 class RuntimeTests(unittest.TestCase):
@@ -133,6 +145,42 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(result.timed_out)
             self.assertEqual(rows[-2]["payload"]["item"]["status"], "failed")
             self.assertEqual(rows[-1]["payload"]["turn"]["status"], "failed")
+
+    def test_runtime_reuses_thread_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+            asyncio.run(runtime.run_user_turn(thread, "first"))
+            asyncio.run(runtime.run_user_turn(thread, "second"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.thread_context)
+            self.assertIn("User: first", request.thread_context)
+            self.assertIn("Assistant: echo:first", request.thread_context)
+
+    def test_runtime_can_resume_thread(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path, title="resume test")
+            asyncio.run(runtime.run_user_turn(thread, "hello"))
+
+            resumed = runtime.resume_thread(thread.id)
+
+            self.assertEqual(resumed.id, thread.id)
+            self.assertEqual(resumed.cwd, thread.cwd)
+            self.assertEqual(resumed.title, "resume test")
+
+            message = asyncio.run(runtime.run_user_turn(resumed, "again"))
+            self.assertIn("Provider is not configured yet.", message)
 
 
 if __name__ == "__main__":

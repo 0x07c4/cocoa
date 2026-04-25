@@ -38,6 +38,10 @@ export COCOA_OPENAI_API_KEY="..."
 export COCOA_OPENAI_MODEL="..."
 export COCOA_OPENAI_BASE_URL="https://api.openai.com/v1" # optional
 PYTHONPATH=src python -m cocoa ask "summarize this workspace"
+PYTHONPATH=src python -m cocoa ask "continue there" --thread <thread_id>
+
+# Resume from existing thread in interactive mode:
+PYTHONPATH=src python -m cocoa repl --thread <thread_id>
 ```
 
 Supported optional variables:

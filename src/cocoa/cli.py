@@ -33,9 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
     ask = subparsers.add_parser("ask", help="Run one recorded user turn.")
     ask.add_argument("prompt", help="User prompt.")
     ask.add_argument("--cwd", default=".", help="Workspace directory.")
+    ask.add_argument("--thread", help="Resume an existing thread id.")
 
     repl = subparsers.add_parser("repl", help="Start a line-oriented cocoa session.")
     repl.add_argument("--cwd", default=".", help="Workspace directory.")
+    repl.add_argument("--thread", help="Resume an existing thread id.")
 
     threads = subparsers.add_parser("threads", help="List recorded threads.")
     threads.add_argument("--cwd", default=".", help="Workspace directory.")
@@ -100,9 +102,12 @@ def print_inspect(cwd: Path, path: str, max_entries: int) -> None:
         print(f"... capped at {max_entries} entries")
 
 
-async def run_ask(cwd: Path, prompt: str) -> None:
+async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
     runtime, store = make_runtime(cwd)
-    thread = runtime.start_thread(cwd, title=prompt[:80])
+    if thread_id is None:
+        thread = runtime.start_thread(cwd, title=prompt[:80])
+    else:
+        thread = runtime.resume_thread(thread_id)
     message = await runtime.run_user_turn(thread, prompt)
     print(message)
     print()
@@ -110,9 +115,12 @@ async def run_ask(cwd: Path, prompt: str) -> None:
     print(f"log: {store.thread_path(thread.id)}")
 
 
-async def run_repl(cwd: Path) -> None:
+async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
     runtime, store = make_runtime(cwd)
-    thread = runtime.start_thread(cwd, title="repl")
+    if thread_id is None:
+        thread = runtime.start_thread(cwd, title="repl")
+    else:
+        thread = runtime.resume_thread(thread_id)
     shell = ShellTool(ConsoleApprovalPrompter())
 
     print(f"cocoa {__version__}")
@@ -188,14 +196,17 @@ def main(argv: list[str] | None = None) -> int:
             print_inspect(cwd, args.path, args.max)
             return 0
         if args.command == "ask":
-            asyncio.run(run_ask(cwd, args.prompt))
+            asyncio.run(run_ask(cwd, args.prompt, args.thread))
             return 0
         if args.command == "repl":
-            asyncio.run(run_repl(cwd))
+            asyncio.run(run_repl(cwd, args.thread))
             return 0
         if args.command == "threads":
             print_threads(cwd)
             return 0
+    except ValueError as exc:
+        print(f"invalid thread: {exc}", file=sys.stderr)
+        return 3
     except ProviderConfigurationError as exc:
         print(f"provider configuration error: {exc}", file=sys.stderr)
         return 2

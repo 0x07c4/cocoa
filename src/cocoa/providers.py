@@ -17,6 +17,7 @@ class ProviderRequest:
     turn_id: str
     prompt: str
     cwd: str
+    thread_context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -199,15 +200,18 @@ class OpenAICompatibleProvider:
         )
 
     def _format_user_prompt(self, request: ProviderRequest) -> str:
-        return "\n".join(
-            [
-                f"Workspace: {request.cwd}",
-                f"Thread: {request.thread_id}",
-                f"Turn: {request.turn_id}",
-                "",
-                request.prompt,
-            ]
-        )
+        lines = [
+            f"Workspace: {request.cwd}",
+            f"Thread: {request.thread_id}",
+            f"Turn: {request.turn_id}",
+            "",
+        ]
+        if request.thread_context:
+            lines.append("Recent thread context:")
+            lines.append(request.thread_context)
+            lines.append("")
+        lines.append(request.prompt)
+        return "\n".join(lines)
 
     def _extract_message(self, data: dict[str, Any]) -> str:
         choices = data.get("choices")
@@ -245,6 +249,7 @@ class OpenAICompatibleProvider:
 class CodexProvider:
     def __init__(self, config: CodexConfig) -> None:
         self.config = config
+        self._supports_ask_for_approval: bool | None = None
 
     async def complete(self, request: ProviderRequest) -> ProviderResponse:
         return self._complete_sync(request)
@@ -256,14 +261,7 @@ class CodexProvider:
             env["CODEX_HOME"] = self.config.codex_home
 
         try:
-            completed = subprocess.run(
-                command,
-                env=env,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self.config.timeout_seconds,
-            )
+            completed = self._run_codex(command, env=env, timeout=self.config.timeout_seconds)
         except FileNotFoundError as exc:
             raise ProviderConfigurationError(
                 f'codex executable not found: {self.config.binary}. Set COCOA_CODEX_BINARY to a valid path.'
@@ -285,34 +283,90 @@ class CodexProvider:
 
         return ProviderResponse(message=message, summary=message[:80])
 
+    def _run_codex(self, command: list[str], *, env: dict[str, str], timeout: float):
+        completed = subprocess.run(
+            command,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+        if (
+            completed.returncode == 2
+            and "--ask-for-approval" in command
+            and self._supports_ask_for_approval is not False
+            and (
+                "unknown option" in completed.stderr.lower()
+                or "unexpected argument" in completed.stderr.lower()
+            )
+            and "ask-for-approval" in completed.stderr.lower()
+        ):
+            self._supports_ask_for_approval = False
+            command = self._strip_ask_for_approval(command)
+            completed = subprocess.run(
+                command,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        elif (
+            completed.returncode == 0
+            and self._supports_ask_for_approval is None
+            and "--ask-for-approval" in command
+        ):
+            self._supports_ask_for_approval = True
+
+        return completed
+
+    def _strip_ask_for_approval(self, command: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        skip_next = False
+        for index, token in enumerate(command):
+            if skip_next:
+                skip_next = False
+                continue
+            if token == "--ask-for-approval":
+                if index + 1 < len(command):
+                    skip_next = True
+                continue
+            cleaned.append(token)
+        return cleaned
+
     def _build_command(self, request: ProviderRequest) -> list[str]:
         args: list[str] = [
             self.config.binary,
             "exec",
             "--json",
             "--skip-git-repo-check",
-            "--ask-for-approval",
-            self.config.ask_for_approval,
             "--sandbox",
             self.config.sandbox,
             "--cd",
             request.cwd,
         ]
+        if self._supports_ask_for_approval is not False:
+            args.extend(["--ask-for-approval", self.config.ask_for_approval])
         if self.config.model:
             args.extend(["-m", self.config.model])
         args.append(self._format_prompt(request))
         return args
 
     def _format_prompt(self, request: ProviderRequest) -> str:
-        return "\n".join(
-            [
-                f"Workspace: {request.cwd}",
-                f"Thread: {request.thread_id}",
-                f"Turn: {request.turn_id}",
-                "",
-                request.prompt,
-            ]
-        )
+        lines = [
+            f"Workspace: {request.cwd}",
+            f"Thread: {request.thread_id}",
+            f"Turn: {request.turn_id}",
+            "",
+        ]
+        if request.thread_context:
+            lines.append("Recent thread context:")
+            lines.append(request.thread_context)
+            lines.append("")
+        lines.append(request.prompt)
+        return "\n".join(lines)
 
     def _extract_agent_message(self, raw: str) -> tuple[str | None, str | None]:
         last_message: str | None = None
@@ -348,12 +402,22 @@ class CodexProvider:
     def _extract_item_text(self, item: object) -> str | None:
         if not isinstance(item, dict):
             return None
+        item_type = item.get("type")
         details = item.get("details")
         if not isinstance(details, dict):
+            details = {}
+
+        if item_type is None and isinstance(details, dict):
+            item_type = details.get("type")
+
+        if item_type != "agent_message":
             return None
-        if details.get("type") != "agent_message":
+
+        text = item.get("text")
+        if not isinstance(text, str):
+            text = details.get("text")
+        if text is None:
             return None
-        text = details.get("text")
         if isinstance(text, str) and text.strip():
             return text
         return None
