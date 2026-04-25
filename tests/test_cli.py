@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
 
@@ -20,8 +21,9 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(args.thread)
 
     def test_provider_status_reports_stub_when_default(self) -> None:
-        with mock.patch.dict(os.environ, {}, clear=True):
-            status = _resolve_provider_status()
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                status = _resolve_provider_status()
         self.assertEqual(status, "stub")
 
     def test_provider_status_reports_missing_config(self) -> None:
@@ -31,12 +33,22 @@ class CliTests(unittest.TestCase):
         self.assertIn("missing", status)
 
     def test_provider_not_configured_by_default(self) -> None:
-        with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(_is_provider_configured())
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(
+                os.environ,
+                {"COCOA_CODEX_HOME": tmpdir},
+                clear=True,
+            ):
+                self.assertFalse(_is_provider_configured())
 
     def test_provider_model_unknown_by_default(self) -> None:
-        with mock.patch.dict(os.environ, {}, clear=True):
-            model = _resolve_provider_model()
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(
+                os.environ,
+                {"COCOA_CODEX_HOME": tmpdir},
+                clear=True,
+            ):
+                model = _resolve_provider_model()
         self.assertEqual(model, "unknown")
 
     def test_provider_model_for_openai_config(self) -> None:

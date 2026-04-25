@@ -165,6 +165,25 @@ def _resolve_codex_api_key(env: Mapping[str, str]) -> str | None:
     return _read_codex_auth_token(codex_home)
 
 
+def _resolve_provider_from_env(env: Mapping[str, str]) -> str:
+    explicit = env.get("COCOA_PROVIDER", "").strip().lower()
+    if explicit:
+        return explicit
+
+    if (env.get("COCOA_OPENAI_API_KEY") or env.get("OPENAI_API_KEY")) and (
+        env.get("COCOA_OPENAI_MODEL") or env.get("OPENAI_MODEL")
+    ):
+        return "openai"
+
+    explicit_codex_key = env.get("COCOA_CODEX_API_KEY") or env.get("CODEX_API_KEY")
+    if explicit_codex_key:
+        return "codex-http"
+    if _read_codex_auth_token(_codex_home_from_env(env)):
+        return "codex-http"
+
+    return "stub"
+
+
 @dataclass(frozen=True)
 class ProviderRequest:
     thread_id: str
@@ -206,8 +225,12 @@ class OpenAICompatibleConfig:
     max_tokens: int | None = None
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] = os.environ) -> "OpenAICompatibleConfig | None":
-        provider = env.get("COCOA_PROVIDER", "stub").lower()
+    def from_env(
+        cls,
+        env: Mapping[str, str] = os.environ,
+        provider: str | None = None,
+    ) -> "OpenAICompatibleConfig | None":
+        provider = (provider if provider is not None else env.get("COCOA_PROVIDER", "stub")).lower()
         if provider in {"", "stub"}:
             return None
         if provider not in {"openai", "openai-compatible"}:
@@ -247,8 +270,12 @@ class CodexResponsesConfig:
     max_tokens: int | None = None
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] = os.environ) -> "CodexResponsesConfig | None":
-        provider = env.get("COCOA_PROVIDER", "stub").lower()
+    def from_env(
+        cls,
+        env: Mapping[str, str] = os.environ,
+        provider: str | None = None,
+    ) -> "CodexResponsesConfig | None":
+        provider = (provider if provider is not None else env.get("COCOA_PROVIDER", "stub")).lower()
         if provider not in {"codex-http", "codex-responses", "openai-codex"}:
             return None
 
@@ -290,8 +317,12 @@ class CodexConfig:
     codex_home: str | None = None
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] = os.environ) -> "CodexConfig":
-        provider = env.get("COCOA_PROVIDER", "stub").lower()
+    def from_env(
+        cls,
+        env: Mapping[str, str] = os.environ,
+        provider: str | None = None,
+    ) -> "CodexConfig":
+        provider = (provider if provider is not None else env.get("COCOA_PROVIDER", "stub")).lower()
         if provider != "codex":
             raise ProviderConfigurationError(f"unsupported provider: {provider}")
 
@@ -914,37 +945,40 @@ class CodexProvider:
 
 
 def provider_from_env(env: Mapping[str, str] = os.environ) -> ProviderAdapter:
-    provider = env.get("COCOA_PROVIDER", "stub").lower()
+    provider = _resolve_provider_from_env(env)
     if provider in {"", "stub"}:
         return StubProvider()
     if provider in {"openai", "openai-compatible"}:
-        config = OpenAICompatibleConfig.from_env(env)
+        config = OpenAICompatibleConfig.from_env(env, provider=provider)
         if config is None:
             raise ProviderConfigurationError("missing OpenAI configuration")
         return OpenAICompatibleProvider(config)
     if provider in {"codex-http", "codex-responses", "openai-codex"}:
-        return CodexResponsesProvider(CodexResponsesConfig.from_env(env))
+        config = CodexResponsesConfig.from_env(env, provider=provider)
+        if config is None:
+            raise ProviderConfigurationError("missing OpenAI-compatible configuration")
+        return CodexResponsesProvider(config)
     if provider == "codex":
         return CodexProvider(CodexConfig.from_env(env))
     raise ProviderConfigurationError(f"unsupported provider: {provider}")
 
 
 def provider_name_from_env(env: Mapping[str, str] = os.environ) -> str:
-    provider = env.get("COCOA_PROVIDER", "stub").lower()
+    provider = _resolve_provider_from_env(env)
     if provider in {"", "stub"}:
         return "stub"
     if provider in {"openai", "openai-compatible"}:
-        config = OpenAICompatibleConfig.from_env(env)
+        config = OpenAICompatibleConfig.from_env(env, provider=provider)
         if config is None:
             raise ProviderConfigurationError("missing OpenAI configuration")
         return f"openai-compatible:{config.model}"
     if provider in {"codex-http", "codex-responses", "openai-codex"}:
-        config = CodexResponsesConfig.from_env(env)
+        config = CodexResponsesConfig.from_env(env, provider=provider)
         if config is None:
             raise ProviderConfigurationError("missing OpenAI-compatible configuration")
         return f"codex-http:{config.model}"
     if provider == "codex":
-        config = CodexConfig.from_env(env)
+        config = CodexConfig.from_env(env, provider=provider)
         if config.model:
             return f"codex:{config.model}"
         return "codex"

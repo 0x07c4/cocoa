@@ -27,6 +27,9 @@ PYTHONPATH=src python -m cocoa repl  # explicitly start repl
 # Or just enter an interactive 会话 directly:
 PYTHONPATH=src python -m cocoa
 
+Note:
+- If a valid codex auth token is available in COCOA_CODEX_API_KEY/CODEX auth file, cocoa will auto-select `codex-http` on first start.
+
 # 在 REPL 里查看 provider：
 # /provider   show current provider and model
 

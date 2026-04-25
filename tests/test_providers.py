@@ -151,21 +151,29 @@ class ProviderTests(unittest.TestCase):
             provider._extract_message({"choices": [{"message": {"content": None}}]})
 
     def test_provider_env_falls_back_to_stub_without_required_values(self) -> None:
-        saved = {key: os.environ.get(key) for key in ["COCOA_PROVIDER"]}
-        try:
-            for key in saved:
-                os.environ.pop(key, None)
+        with TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                provider = provider_from_env()
+                self.assertEqual(provider.__class__.__name__, "StubProvider")
+                self.assertEqual(provider_name_from_env(), "stub")
 
-            provider = provider_from_env()
+    def test_provider_env_auto_detects_codex_http_from_token(self) -> None:
+        env = {
+            "COCOA_CODEX_API_KEY": "auto-token",
+            "COCOA_CODEX_MODEL": "auto-codex",
+        }
+        provider = provider_from_env(env)
+        self.assertEqual(provider.__class__.__name__, "CodexResponsesProvider")
+        self.assertEqual(provider_name_from_env(env), "codex-http:auto-codex")
 
-            self.assertEqual(provider.__class__.__name__, "StubProvider")
-            self.assertEqual(provider_name_from_env(), "stub")
-        finally:
-            for key, value in saved.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+    def test_provider_env_auto_detects_openai_from_key_and_model(self) -> None:
+        env = {
+            "COCOA_OPENAI_API_KEY": "openai-token",
+            "COCOA_OPENAI_MODEL": "openai-model",
+        }
+        provider = provider_from_env(env)
+        self.assertEqual(provider.__class__.__name__, "OpenAICompatibleProvider")
+        self.assertEqual(provider_name_from_env(env), "openai-compatible:openai-model")
 
     def test_provider_env_requires_key_and_model_when_openai_selected(self) -> None:
         env = {"COCOA_PROVIDER": "openai"}
