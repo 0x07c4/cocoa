@@ -174,6 +174,60 @@ class CliTests(unittest.TestCase):
         self.assertIn("COCOA_PROVIDER set", logs)
         self.assertIn("provider: openai-compatible:gpt-5", logs)
 
+    def test_repl_set_persist_in_session(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        "/set --persist COCOA_PROVIDER=openai",
+                        "/set --persist COCOA_OPENAI_API_KEY=sk-session-persist",
+                        "/set --persist COCOA_OPENAI_MODEL=gpt-5",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=Path(tmpdir)))
+            cfg_path = Path(tmpdir) / ".cocoa" / "config.env"
+            self.assertTrue(cfg_path.exists())
+            cfg = cfg_path.read_text(encoding="utf-8")
+            self.assertIn("COCOA_PROVIDER=openai", cfg)
+            self.assertIn("COCOA_OPENAI_API_KEY=sk-session-persist", cfg)
+            self.assertIn("COCOA_OPENAI_MODEL=gpt-5", cfg)
+
+        logs = output.getvalue()
+        self.assertIn("COCOA_PROVIDER persisted and set", logs)
+        self.assertIn("COCOA_OPENAI_API_KEY persisted and set", logs)
+        self.assertIn("COCOA_OPENAI_MODEL persisted and set", logs)
+
+    def test_repl_persist_command_writes_overrides(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        "/set COCOA_PROVIDER=openai",
+                        "/set COCOA_OPENAI_API_KEY=sk-session-persist2",
+                        "/set COCOA_OPENAI_MODEL=gpt-4.1",
+                        "/persist",
+                        "/provider",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=Path(tmpdir)))
+            cfg_path = Path(tmpdir) / ".cocoa" / "config.env"
+            self.assertTrue(cfg_path.exists())
+            cfg = cfg_path.read_text(encoding="utf-8")
+            self.assertIn("COCOA_PROVIDER=openai", cfg)
+            self.assertIn("COCOA_OPENAI_API_KEY=sk-session-persist2", cfg)
+            self.assertIn("COCOA_OPENAI_MODEL=gpt-4.1", cfg)
+        logs = output.getvalue()
+        self.assertIn("session overrides persisted to .cocoa/config.env", logs)
+        self.assertIn("provider: openai-compatible:gpt-4.1", logs)
+
 
     def test_persist_environment_overwrites_keys(self) -> None:
         with TemporaryDirectory() as tmpdir:

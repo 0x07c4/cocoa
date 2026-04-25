@@ -38,7 +38,8 @@ PYTHONPATH=src python -m cocoa repl
 在 REPL 中直接输入：
 - `/configure openai <api_key> <model> [base_url]`
 - `/configure codex-http [model]`
-- `/set KEY VALUE`（仅本会话生效；支持 `KEY=VALUE`）
+- `/set [--persist|-p] KEY VALUE`（支持 `KEY=VALUE`，带 `--persist` 同时写入 `.cocoa/config.env`）
+- `/persist`（保存当前会话内所有临时变量到 `.cocoa/config.env`）
 
 `/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
 

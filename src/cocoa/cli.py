@@ -247,7 +247,7 @@ def _is_provider_configured(env: Mapping[str, str] | None = None) -> bool:
 
 def _print_provider_config_help() -> None:
     print("provider is not configured.")
-    print("Run one of these and restart cocoa:")
+    print("Run one of these in current session (persisted by /configure):")
     print("")
     print("# OpenAI-compatible")
     print("export COCOA_PROVIDER=openai")
@@ -319,7 +319,9 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             print("/provider           show provider status")
             print("/model              show model selection")
             print("/configure          configure provider in session or save config")
-            print("/set KEY VALUE      set session variable and apply immediately")
+            print("/set [--persist|-p] KEY VALUE")
+            print("                    set session variable (and optionally persist)")
+            print("/persist            persist current session overrides to .cocoa/config.env")
             print("/inspect [path]     list workspace files")
             print("/run <command>      run shell command after approval")
             print("/exit               quit")
@@ -372,24 +374,47 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             continue
         if line.startswith("/set "):
             _, _, raw = line.partition(" ")
-            if "=" in raw:
-                key, value = raw.split("=", 1)
-                key = key.strip()
-                value = value.strip()
-            else:
+            try:
                 tokens = shlex.split(raw)
-                if len(tokens) < 2:
-                    print("usage: /set KEY VALUE")
-                    continue
+            except ValueError:
+                print("invalid quoting in command")
+                continue
+            persist = False
+            if not tokens:
+                print("usage: /set [--persist|-p] KEY VALUE")
+                continue
+            if tokens[0] in {"-p", "--persist"}:
+                persist = True
+                tokens = tokens[1:]
+            if not tokens:
+                print("usage: /set [--persist|-p] KEY VALUE")
+                continue
+            if "=" in tokens[0] and len(tokens) == 1:
+                key, value = tokens[0].split("=", 1)
+            elif len(tokens) >= 2:
                 key = tokens[0]
-                value = tokens[1]
+                value = " ".join(tokens[1:])
+            else:
+                print("usage: /set [--persist|-p] KEY VALUE")
+                continue
             if not key:
                 print("missing variable name")
                 continue
             set_and_reload_env(key, value)
             env = _effective_session_environment(cwd, overrides)
-            print(f"{key} set")
+            if persist:
+                _persist_environment(cwd, {key: value})
+            print(
+                f"{key} {'persisted and ' if persist else ''}set"
+            )
             print_provider_status()
+            continue
+        if line == "/persist":
+            if not overrides:
+                print("no session overrides to persist")
+                continue
+            _persist_environment(cwd, overrides)
+            print("session overrides persisted to .cocoa/config.env")
             continue
         if line == "/status":
             print(f"thread: {thread.id}")
