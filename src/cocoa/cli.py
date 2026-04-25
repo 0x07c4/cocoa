@@ -20,7 +20,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Terminal-native agentic coding system.",
     )
     parser.add_argument("--version", action="version", version=f"cocoa {__version__}")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.set_defaults(command="repl", cwd=".", thread=None)
+    subparsers = parser.add_subparsers(dest="command", required=False)
 
     doctor = subparsers.add_parser("doctor", help="Print local runtime status.")
     doctor.add_argument("--cwd", default=".", help="Workspace directory.")
@@ -189,6 +190,8 @@ def print_threads(cwd: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command is None:
+        args.command = "repl"
     cwd = resolve_cwd(args.cwd)
 
     try:

@@ -22,6 +22,9 @@ PYTHONPATH=src python -m cocoa doctor
 PYTHONPATH=src python -m cocoa inspect .
 PYTHONPATH=src python -m cocoa ask "summarize this workspace"
 PYTHONPATH=src python -m cocoa repl
+
+# Or just enter an interactive 会话 directly:
+PYTHONPATH=src python -m cocoa
 ```
 
 State is written under `.cocoa/` in the selected workspace.
