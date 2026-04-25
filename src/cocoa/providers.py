@@ -452,20 +452,142 @@ class CodexResponsesProvider:
         return self._complete_sync(request)
 
     def _complete_sync(self, request: ProviderRequest) -> ProviderResponse:
+        payload = self._build_responses_payload(request, as_list=False)
+        try:
+            raw = self._send_responses_request(payload)
+        except ProviderHTTPError as exc:
+            payload_list = self._build_responses_payload(request, as_list=True)
+            if (
+                "Input must be a list" in str(exc)
+                and payload["input"] != payload_list["input"]
+            ):
+                raw = self._send_responses_request(payload_list)
+            else:
+                raise
+        except urllib.error.URLError as exc:
+            raise ProviderHTTPError(f"provider connection failed: {exc.reason}") from exc
+
+        stream_events = None
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                try:
+                    message = self._extract_message(data)
+                except ProviderResponseError:
+                    stream_events = self._parse_responses_stream(raw)
+                    message = self._extract_message_from_stream_events(stream_events)
+            else:
+                stream_events = self._parse_responses_stream(raw)
+                message = self._extract_message_from_stream_events(stream_events)
+        except json.JSONDecodeError as exc:
+            if stream_events is None:
+                stream_events = self._parse_responses_stream(raw)
+            message = self._extract_message_from_stream_events(stream_events)
+            if not isinstance(message, str):
+                raise ProviderResponseError("provider response missing text content") from exc
+
+        if not isinstance(message, str):
+            raise ProviderResponseError("provider response missing text content")
+        if not message.strip():
+            raise ProviderResponseError("provider returned empty response")
+        return ProviderResponse(message=message, summary=message[:80])
+
+    def _build_responses_payload(
+        self, request: ProviderRequest, *, as_list: bool
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.config.model,
-            "input": self._format_user_prompt(request),
+            "input": self._format_user_prompt(request)
+            if not as_list
+            else self._build_responses_input_list(request),
+            "instructions": (
+                "You are cocoa, a terminal-native coding assistant. "
+                "Return concise, actionable responses. Do not claim to have changed files or "
+                "run commands unless the cocoa runtime did it."
+            ),
         }
-        payload["instructions"] = (
-            "You are cocoa, a terminal-native coding assistant. "
-            "Return concise, actionable responses. Do not claim to have changed files or "
-            "run commands unless the cocoa runtime did it."
-        )
+        payload["store"] = False
+        payload["stream"] = True
         if self.config.temperature is not None:
             payload["temperature"] = self.config.temperature
         if self.config.max_tokens is not None:
             payload["max_output_tokens"] = self.config.max_tokens
+        return payload
 
+    def _parse_responses_stream(self, raw: str) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for line in raw.splitlines():
+            text = line.strip()
+            if not text or text.startswith(":"):
+                continue
+            if text.startswith("data:"):
+                text = text[5:].strip()
+                if text == "[DONE]" or not text:
+                    continue
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                events.append(parsed)
+            elif isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        events.append(item)
+        return events
+
+    def _extract_message_from_stream_events(self, events: list[dict[str, Any]]) -> str | None:
+        if not events:
+            return None
+
+        text_parts: list[str] = []
+        collected_output_items: list[dict[str, Any]] = []
+        terminal_response: dict[str, Any] | None = None
+
+        for event in events:
+            event_type = event.get("type")
+            if event_type == "response.output_item.done":
+                item = event.get("item")
+                if isinstance(item, dict):
+                    collected_output_items.append(item)
+            elif event_type in {"response.output_text", "response.output_text.delta", "response.output_text.done"}:
+                delta = event.get("delta")
+                if not isinstance(delta, str):
+                    delta = event.get("text")
+                if isinstance(delta, str):
+                    text_parts.append(delta)
+
+            if event_type in {"response.completed", "response.incomplete", "response.failed"}:
+                response = event.get("response")
+                if isinstance(response, dict):
+                    terminal_response = response
+
+            if terminal_response is None and isinstance(event.get("response"), dict):
+                terminal_response = event["response"]
+
+        if terminal_response is not None:
+            try:
+                return self._extract_message(terminal_response)
+            except ProviderResponseError:
+                output = terminal_response.get("output")
+                if isinstance(output, list):
+                    text = self._extract_output_text(output)
+                    if text:
+                        return text
+
+        if collected_output_items:
+            assembled_output = self._extract_output_text(collected_output_items)
+            if assembled_output:
+                return assembled_output
+
+        if text_parts:
+            return "".join(text_parts).strip()
+        return None
+
+    def _build_responses_input_list(self, request: ProviderRequest) -> list[dict[str, Any]]:
+        return [{"role": "user", "content": self._format_user_prompt(request)}]
+
+    def _send_responses_request(self, payload: dict[str, Any]) -> str:
         body = json.dumps(payload).encode("utf-8")
         http_request = urllib.request.Request(
             f"{self.config.base_url.rstrip('/')}/responses",
@@ -482,7 +604,7 @@ class CodexResponsesProvider:
                 http_request,
                 timeout=self.config.timeout_seconds,
             ) as response:
-                raw = response.read().decode("utf-8")
+                return response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             try:
                 error_body = exc.read().decode("utf-8", errors="replace")
@@ -491,21 +613,6 @@ class CodexResponsesProvider:
             raise ProviderHTTPError(
                 f"provider HTTP {exc.code}: {self._extract_error_message(error_body)}"
             ) from exc
-        except urllib.error.URLError as exc:
-            raise ProviderHTTPError(f"provider connection failed: {exc.reason}") from exc
-
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ProviderResponseError("provider returned invalid JSON") from exc
-
-        message = self._extract_message(data)
-        summary = message[:80] if isinstance(message, str) else None
-        if not isinstance(message, str):
-            raise ProviderResponseError("provider response missing text content")
-        if not message.strip():
-            raise ProviderResponseError("provider returned empty response")
-        return ProviderResponse(message=message, summary=summary)
 
     def _format_user_prompt(self, request: ProviderRequest) -> str:
         return (

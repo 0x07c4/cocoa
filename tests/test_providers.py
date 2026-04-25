@@ -6,6 +6,7 @@ import os
 from io import BytesIO
 from pathlib import Path
 import sys
+import urllib.error
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -420,6 +421,8 @@ class ProviderTests(unittest.TestCase):
             "Return concise, actionable responses. Do not claim to have changed files or "
             "run commands unless the cocoa runtime did it."
         ))
+        self.assertEqual(payload["store"], False)
+        self.assertEqual(payload["stream"], True)
         self.assertEqual(payload["input"], "Workspace: /tmp/project\nThread: thr_responses\nTurn: turn_responses\n\n"
                                          "Recent thread context:\nUser: first\nAssistant: done\n\nhello responses")
 
@@ -452,6 +455,93 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["input"], (
             "Workspace: /tmp/project\nThread: thr_responses_chat\nTurn: turn_responses_chat\n\nhello"
         ))
+
+    def test_codex_responses_provider_retries_with_input_list(self) -> None:
+        captured: list[dict[str, object]] = []
+
+        def fake_urlopen(request, timeout: float):
+            payload = json.loads(request.data.decode("utf-8"))
+            captured.append(payload)
+            if isinstance(payload.get("input"), str):
+                raise urllib.error.HTTPError(
+                    url=request.full_url,
+                    code=400,
+                    msg="Bad Request",
+                    hdrs={},
+                    fp=BytesIO(
+                        json.dumps({"detail": "Input must be a list"}).encode("utf-8")
+                    ),
+                )
+            return FakeHTTPResponse(
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "text", "text": "recovered by input list"},
+                            ],
+                        }
+                    ]
+                }
+            )
+
+        config = CodexResponsesConfig(api_key="token", model="codex-model")
+        provider = CodexResponsesProvider(config)
+        request = ProviderRequest(
+            thread_id="thr_responses_list",
+            turn_id="turn_responses_list",
+            prompt="hello",
+            cwd="/tmp/project",
+        )
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            response = asyncio.run(provider.complete(request))
+
+        self.assertEqual(response.message, "recovered by input list")
+        self.assertEqual(len(captured), 2)
+        self.assertIsInstance(captured[0]["input"], str)
+        self.assertIsInstance(captured[1]["input"], list)
+
+    def test_codex_responses_provider_supports_stream_events(self) -> None:
+        captured: dict[str, object] = {}
+        class _StreamResponse:
+            def __init__(self, body: str):
+                self._body = body
+
+            def __enter__(self) -> "_StreamResponse":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return self._body.encode("utf-8")
+
+        def fake_urlopen(request, timeout: float):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            stream_body = (
+                'data: {"type":"response.output_text.delta","delta":"streamed "}\n'
+                'data: {"type":"response.output_text.delta","delta":"response"}\n'
+                'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":" stream parsed."}]}]}}\n'
+            )
+            return _StreamResponse(stream_body)
+
+        config = CodexResponsesConfig(api_key="token", model="codex-model")
+        provider = CodexResponsesProvider(config)
+        request = ProviderRequest(
+            thread_id="thr_stream",
+            turn_id="turn_stream",
+            prompt="stream now",
+            cwd="/tmp/project",
+        )
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            response = asyncio.run(provider.complete(request))
+
+        self.assertEqual(response.message, "stream parsed.")
+        payload = captured["payload"]  # type: ignore[assignment]
+        self.assertEqual(payload["stream"], True)
+        self.assertEqual(payload["store"], False)
 
     def test_codex_provider_builds_command_and_extracts_message(self) -> None:
         captured: dict[str, object] = {}
