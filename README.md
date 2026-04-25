@@ -46,6 +46,24 @@ Supported optional variables:
 - `COCOA_OPENAI_TEMPERATURE`
 - `COCOA_OPENAI_MAX_TOKENS`
 
+To use Codex (ChatGPT Plus/Pro account session):
+
+```sh
+export COCOA_PROVIDER="codex"
+export COCOA_CODEX_BINARY="codex"           # optional
+export COCOA_CODEX_MODEL="o3-mini"          # optional
+export COCOA_CODEX_SANDBOX="read-only"      # optional
+export COCOA_CODEX_APPROVAL="never"         # optional
+export COCOA_CODEX_TIMEOUT_SECONDS="60"     # optional
+```
+
+Optional Codex mapping:
+
+- `COCOA_CODEX_HOME` maps to `CODEX_HOME` so you can point to a custom auth/session home.
+- `COCOA_CODEX_BINARY` changes the executable path.
+- `COCOA_CODEX_SANDBOX` supports `read-only`, `workspace-write`, `danger-full-access`.
+- `COCOA_CODEX_APPROVAL` supports `untrusted`, `on-failure`, `on-request`, `never`.
+
 `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` are accepted as
 fallbacks when `COCOA_PROVIDER=openai`. The provider only returns model text;
 `cocoa` runtime still owns item creation, event recording, approval state, and

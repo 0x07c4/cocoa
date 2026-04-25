@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from cocoa.providers import (
     OpenAICompatibleConfig,
+    CodexConfig,
+    CodexProvider,
     OpenAICompatibleProvider,
     ProviderConfigurationError,
     ProviderHTTPError,
@@ -35,6 +37,13 @@ class FakeHTTPResponse:
 
     def read(self) -> bytes:
         return json.dumps(self.payload).encode("utf-8")
+
+
+class FakeCompletedProcess:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class ProviderTests(unittest.TestCase):
@@ -168,6 +177,119 @@ class ProviderTests(unittest.TestCase):
 
         self.assertNotIn("secret-key", str(raised.exception))
         self.assertIn("provider HTTP 401", str(raised.exception))
+
+    def test_provider_env_builds_codex_provider(self) -> None:
+        env = {
+            "COCOA_PROVIDER": "codex",
+            "COCOA_CODEX_BINARY": "codex-test",
+            "COCOA_CODEX_MODEL": "codex-model",
+            "COCOA_CODEX_TIMEOUT_SECONDS": "12",
+            "COCOA_CODEX_SANDBOX": "workspace-write",
+            "COCOA_CODEX_APPROVAL": "never",
+            "COCOA_CODEX_HOME": "/tmp/cocoa-codex",
+        }
+        provider = provider_from_env(env)
+
+        self.assertEqual(provider.__class__.__name__, "CodexProvider")
+        self.assertEqual(provider_name_from_env(env), "codex:codex-model")
+
+    def test_codex_provider_builds_command_and_extracts_message(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_run(
+            args: list[str],
+            env: dict[str, str],
+            check: bool,
+            capture_output: bool,
+            text: bool,
+            timeout: float,
+        ) -> FakeCompletedProcess:
+            captured["args"] = args
+            captured["env"] = env
+            captured["timeout"] = timeout
+            return FakeCompletedProcess(
+                0,
+                stdout="\n".join(
+                    [
+                        '{"type":"thread.started","thread_id":"019dc3"}',
+                        '{"type":"turn.started"}',
+                        (
+                            '{"type":"item.completed","item":{"id":"item_0","details":'
+                            '{"type":"agent_message","text":"from codex"}}}'
+                        ),
+                        '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":0}}',
+                    ]
+                )
+                + "\n",
+            )
+
+        request = ProviderRequest(
+            thread_id="thr_codex",
+            turn_id="turn_codex",
+            prompt="hello codex",
+            cwd="/tmp/project",
+        )
+        provider = CodexProvider(
+            CodexConfig(
+                binary="codex-test",
+                model="codex-model",
+                timeout_seconds=4.0,
+                sandbox="read-only",
+                ask_for_approval="on-request",
+                codex_home="/tmp/cocoa-codex-home",
+            )
+        )
+
+        with patch("subprocess.run", fake_run):
+            response = asyncio.run(provider.complete(request))
+
+        self.assertEqual(response.message, "from codex")
+        self.assertEqual(captured["args"][0], "codex-test")
+        args = captured["args"]  # type: ignore[assignment]
+        self.assertEqual(args[1], "exec")  # type: ignore[index]
+        self.assertIn("--json", args)  # type: ignore[arg-type]
+        self.assertIn("--skip-git-repo-check", args)  # type: ignore[arg-type]
+        self.assertIn("-m", args)  # type: ignore[arg-type]
+        self.assertIn("codex-model", args)  # type: ignore[arg-type]
+        self.assertIn("--cd", args)  # type: ignore[arg-type]
+        self.assertIn("/tmp/project", args)  # type: ignore[arg-type]
+        self.assertIn("Workspace: /tmp/project", str(args[-1]))  # type: ignore[arg-type]
+        self.assertEqual(captured["timeout"], 4.0)  # type: ignore[comparison-overlap]
+
+        command_env = captured["env"]  # type: ignore[assignment]
+        self.assertEqual(command_env.get("CODEX_HOME"), "/tmp/cocoa-codex-home")
+
+    def test_codex_provider_error_when_exit_nonzero(self) -> None:
+        def fake_run(
+            args: list[str],
+            env: dict[str, str],
+            check: bool,
+            capture_output: bool,
+            text: bool,
+            timeout: float,
+        ) -> FakeCompletedProcess:
+            return FakeCompletedProcess(
+                7,
+                stdout='{"type":"error","message":"codex stream failed"}',
+                stderr="fatal: nope",
+            )
+
+        provider = CodexProvider(CodexConfig(binary="codex-test"))
+
+        with patch("subprocess.run", fake_run):
+            with self.assertRaisesRegex(
+                ProviderResponseError, "codex exec failed with code 7: codex stream failed"
+            ):
+                asyncio.run(
+                    provider.complete(
+                        ProviderRequest(
+                            thread_id="thr_codex_err",
+                            turn_id="turn_codex_err",
+                            prompt="oops",
+                            cwd="/tmp/project",
+                        )
+                    )
+                )
 
 
 if __name__ == "__main__":
