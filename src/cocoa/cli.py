@@ -70,7 +70,10 @@ def make_runtime(cwd: Path) -> tuple[AgentRuntime, JsonlStore]:
 
 
 def print_doctor(cwd: Path) -> None:
-    provider_name = provider_name_from_env()
+    try:
+        provider_name = provider_name_from_env()
+    except ProviderConfigurationError as exc:
+        provider_name = f"not configured ({exc})"
     git_root = None
     try:
         completed = subprocess.run(

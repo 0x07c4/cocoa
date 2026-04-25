@@ -52,6 +52,7 @@ Expected provider adapters:
 - OpenAI-compatible Chat Completions HTTP
 - Codex CLI bridge (`codex exec --json`) for compatibility
 - Codex HTTP bridge (`/responses`) via `openai-codex` / `codex-http`, with auto-discovery of tokens from `CODEX_HOME`/`COCOA_CODEX_HOME` `auth.json` when no explicit key is supplied.
+- Codex HTTP model selection prefers `COCOA_CODEX_MODEL`/`OPENAI_MODEL`; when absent it loads `.../models?client_version=1.0.0` and falls back to a safe default list.
 - local model runner
 - external CLI bridge
 

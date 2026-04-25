@@ -15,6 +15,80 @@ from typing import Protocol
 
 
 _CODEX_JWT_REFRESH_SKEW_SECONDS = 120
+_CODEX_DEFAULT_MODELS = [
+    "gpt-5.4-mini",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+]
+
+
+def _resolve_codex_models(
+    api_key: str, base_url: str, *, timeout_seconds: float = 8.0
+) -> list[str]:
+    endpoint = f"{base_url.rstrip('/')}/models?client_version=1.0.0"
+    request = urllib.request.Request(
+        endpoint,
+        headers={"Authorization": f"Bearer {api_key}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return []
+    except OSError:
+        return []
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return []
+
+    visible: list[tuple[int, str]] = []
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        slug = item.get("slug")
+        if not isinstance(slug, str):
+            continue
+        slug = slug.strip()
+        if not slug:
+            continue
+
+        visibility = item.get("visibility")
+        if visibility in {"hide", "hidden"}:
+            continue
+        if item.get("supported_in_api") is False:
+            continue
+
+        priority = item.get("priority")
+        rank = 10_000
+        if isinstance(priority, (int, float)):
+            rank = int(priority)
+        visible.append((rank, slug))
+
+    if not visible:
+        return []
+    visible.sort(key=lambda item: (item[0], item[1]))
+    return [slug for _, slug in visible]
+
+
+def _resolve_codex_model(env: Mapping[str, str], api_key: str, base_url: str) -> str:
+    explicit_model = env.get("COCOA_CODEX_MODEL") or env.get("OPENAI_MODEL")
+    if explicit_model:
+        return explicit_model.strip()
+
+    discovered = _resolve_codex_models(api_key, base_url)
+    if discovered:
+        return discovered[0]
+
+    return _CODEX_DEFAULT_MODELS[0]
 
 
 def _codex_home_from_env(env: Mapping[str, str]) -> Path:
@@ -179,7 +253,8 @@ class CodexResponsesConfig:
             return None
 
         api_key = _resolve_codex_api_key(env)
-        model = env.get("COCOA_CODEX_MODEL") or env.get("OPENAI_MODEL")
+        base_url = env.get("COCOA_CODEX_BASE_URL") or env.get("OPENAI_BASE_URL")
+        model = _resolve_codex_model(env, api_key=api_key, base_url=(base_url or cls.base_url).rstrip("/"))
         if not api_key or not model:
             missing = []
             if not api_key:
@@ -189,11 +264,8 @@ class CodexResponsesConfig:
                     "COCOA_CODEX_API_KEY or OPENAI_API_KEY or OPENAI_TOKEN or CODEX_API_KEY "
                     f"or a valid token in {auth_path}"
                 )
-            if not model:
-                missing.append("COCOA_CODEX_MODEL or OPENAI_MODEL")
             raise ProviderConfigurationError("missing " + ", ".join(missing))
 
-        base_url = env.get("COCOA_CODEX_BASE_URL") or env.get("OPENAI_BASE_URL")
         timeout_raw = env.get("COCOA_CODEX_TIMEOUT_SECONDS")
         temperature_raw = env.get("COCOA_CODEX_TEMPERATURE")
         max_tokens_raw = env.get("COCOA_CODEX_MAX_TOKENS")

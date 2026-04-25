@@ -63,8 +63,8 @@ export COCOA_CODEX_TIMEOUT_SECONDS="60"     # optional
 
 # Recommended Codex HTTP mode (no local CLI process)
 export COCOA_PROVIDER="codex-http"          # or codex-responses / openai-codex
-export COCOA_CODEX_API_KEY="..."            # OAuth/API token
-export COCOA_CODEX_MODEL="gpt-5-codex"     # required
+export COCOA_CODEX_API_KEY="..."            # OAuth/API token, optional if available in auth.json
+export COCOA_CODEX_MODEL="..."              # optional, auto-discovered if omitted
 export COCOA_CODEX_BASE_URL="https://chatgpt.com/backend-api/codex"  # optional
 export COCOA_CODEX_TIMEOUT_SECONDS="60"     # optional
 ```
@@ -78,7 +78,7 @@ Optional Codex CLI bridge mapping:
 
 Optional Codex HTTP env:
 
-- `COCOA_CODEX_API_KEY` (recommended)
+- `COCOA_CODEX_API_KEY` (optional, if not set auto reads `auth.json`)
 - `COCOA_CODEX_HOME` (optional, default `~/.codex`) to locate `auth.json`
 - `CODEX_API_KEY` (legacy CLI-compatible fallback)
 - `COCOA_CODEX_BASE_URL` (defaults to `https://chatgpt.com/backend-api/codex`)
@@ -90,6 +90,18 @@ Optional Codex HTTP env:
 ```json
 { "tokens": { "access_token": "..." } }
 ```
+
+### Zero-config first try
+
+If you already logged into the ChatGPT/Codex browser session locally, run:
+
+```sh
+export COCOA_PROVIDER="codex-http"
+PYTHONPATH=src python -m cocoa doctor
+PYTHONPATH=src python -m cocoa ask "what can you do?"
+```
+
+If `doctor` prints `provider: codex-http:<model>`, token discovery succeeded and runtime is ready.
 
 `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` are accepted as
 fallbacks when `COCOA_PROVIDER=openai`. The provider only returns model text;

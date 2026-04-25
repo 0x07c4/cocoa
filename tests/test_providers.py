@@ -298,6 +298,69 @@ class ProviderTests(unittest.TestCase):
             self.assertEqual(provider.__class__.__name__, "CodexResponsesProvider")
             self.assertEqual(provider_name_from_env(env), "codex-http:gpt-5-codex")
 
+    def test_provider_env_codex_http_defaults_model_when_missing(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            codex_home.mkdir(parents=True)
+            (codex_home / "auth.json").write_text(
+                '{"tokens":{"access_token":"cli-token","refresh_token":"cli-refresh"}}',
+                encoding="utf-8",
+            )
+
+            env = {
+                "COCOA_PROVIDER": "codex-http",
+                "COCOA_CODEX_HOME": str(codex_home),
+            }
+            provider = provider_from_env(env)
+
+            self.assertEqual(provider.__class__.__name__, "CodexResponsesProvider")
+            self.assertEqual(provider_name_from_env(env), "codex-http:gpt-5.4-mini")
+
+    def test_provider_env_codex_http_uses_discovered_model(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            codex_home = Path(tmpdir) / "codex-home"
+            codex_home.mkdir(parents=True)
+            (codex_home / "auth.json").write_text(
+                '{"tokens":{"access_token":"cli-token","refresh_token":"cli-refresh"}}',
+                encoding="utf-8",
+            )
+
+            def fake_urlopen(request, timeout: float):
+                if request.get_method() == "GET":
+                    return FakeHTTPResponse(
+                        {
+                            "models": [
+                                {
+                                    "slug": "o3-mini",
+                                    "priority": 2,
+                                    "supported_in_api": True,
+                                },
+                                {
+                                    "slug": "hidden-model",
+                                    "visibility": "hidden",
+                                    "supported_in_api": True,
+                                    "priority": 1,
+                                },
+                                {
+                                    "slug": "legacy-codex",
+                                    "priority": 0,
+                                    "supported_in_api": False,
+                                },
+                                {"slug": "alpha-model", "priority": 1, "supported_in_api": True},
+                            ]
+                        }
+                    )
+                raise AssertionError("unexpected call")
+
+            env = {
+                "COCOA_PROVIDER": "codex-http",
+                "COCOA_CODEX_HOME": str(codex_home),
+            }
+            with patch("urllib.request.urlopen", fake_urlopen):
+                provider_name = provider_name_from_env(env)
+
+            self.assertEqual(provider_name, "codex-http:alpha-model")
+
     def test_provider_env_reports_missing_codex_http_token(self) -> None:
         with TemporaryDirectory() as tmpdir:
             env = {
