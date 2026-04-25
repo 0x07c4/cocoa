@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .providers import StubProvider
+from .providers import ProviderConfigurationError, provider_from_env, provider_name_from_env
 from .runtime import AgentRuntime
 from .store import JsonlStore
 from .tools import ConsoleApprovalPrompter, ShellTool
@@ -64,10 +64,11 @@ def resolve_cwd(raw: str) -> Path:
 
 def make_runtime(cwd: Path) -> tuple[AgentRuntime, JsonlStore]:
     store = JsonlStore.for_workspace(cwd)
-    return AgentRuntime(store=store, provider=StubProvider()), store
+    return AgentRuntime(store=store, provider=provider_from_env()), store
 
 
 def print_doctor(cwd: Path) -> None:
+    provider_name = provider_name_from_env()
     git_root = None
     try:
         completed = subprocess.run(
@@ -87,7 +88,7 @@ def print_doctor(cwd: Path) -> None:
     print(f"cwd: {cwd}")
     print(f"state: {cwd / '.cocoa'}")
     print(f"git_root: {git_root or '(none)'}")
-    print("provider: stub")
+    print(f"provider: {provider_name}")
 
 
 def print_inspect(cwd: Path, path: str, max_entries: int) -> None:
@@ -179,20 +180,24 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cwd = resolve_cwd(args.cwd)
 
-    if args.command == "doctor":
-        print_doctor(cwd)
-        return 0
-    if args.command == "inspect":
-        print_inspect(cwd, args.path, args.max)
-        return 0
-    if args.command == "ask":
-        asyncio.run(run_ask(cwd, args.prompt))
-        return 0
-    if args.command == "repl":
-        asyncio.run(run_repl(cwd))
-        return 0
-    if args.command == "threads":
-        print_threads(cwd)
-        return 0
+    try:
+        if args.command == "doctor":
+            print_doctor(cwd)
+            return 0
+        if args.command == "inspect":
+            print_inspect(cwd, args.path, args.max)
+            return 0
+        if args.command == "ask":
+            asyncio.run(run_ask(cwd, args.prompt))
+            return 0
+        if args.command == "repl":
+            asyncio.run(run_repl(cwd))
+            return 0
+        if args.command == "threads":
+            print_threads(cwd)
+            return 0
+    except ProviderConfigurationError as exc:
+        print(f"provider configuration error: {exc}", file=sys.stderr)
+        return 2
 
     raise SystemExit(f"unknown command: {args.command}")

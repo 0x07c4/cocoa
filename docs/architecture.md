@@ -49,7 +49,7 @@ protocol.
 
 Expected provider adapters:
 
-- OpenAI-compatible HTTP
+- OpenAI-compatible Chat Completions HTTP
 - local model runner
 - external CLI bridge
 

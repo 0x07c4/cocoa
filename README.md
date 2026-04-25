@@ -26,12 +26,38 @@ PYTHONPATH=src python -m cocoa repl
 
 State is written under `.cocoa/` in the selected workspace.
 
+## Provider
+
+Without provider configuration, `cocoa` uses a deterministic stub provider.
+
+To use an OpenAI-compatible Chat Completions endpoint, select it explicitly:
+
+```sh
+export COCOA_PROVIDER="openai"
+export COCOA_OPENAI_API_KEY="..."
+export COCOA_OPENAI_MODEL="..."
+export COCOA_OPENAI_BASE_URL="https://api.openai.com/v1" # optional
+PYTHONPATH=src python -m cocoa ask "summarize this workspace"
+```
+
+Supported optional variables:
+
+- `COCOA_OPENAI_TIMEOUT_SECONDS`
+- `COCOA_OPENAI_TEMPERATURE`
+- `COCOA_OPENAI_MAX_TOKENS`
+
+`OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` are accepted as
+fallbacks when `COCOA_PROVIDER=openai`. The provider only returns model text;
+`cocoa` runtime still owns item creation, event recording, approval state, and
+persistence.
+
 ## Current Scope
 
 This is an MVP skeleton. It intentionally starts without a model dependency.
-The bundled provider is a stub that records turns and returns a deterministic
-message. The next real step is wiring an OpenAI-compatible provider adapter
-while keeping the runtime protocol stable.
+The bundled provider is a stub, and an OpenAI-compatible Chat Completions
+adapter is available through environment variables. The next real step is
+streaming provider deltas and structured proposal items while keeping the
+runtime protocol stable.
 
 The current implementation records a `Thread`, starts `Turn`s, creates `Item`s,
 and stores lifecycle `Event`s. Events are the append-only trail, not a child
