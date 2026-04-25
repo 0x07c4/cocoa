@@ -53,20 +53,35 @@ Supported optional variables:
 To use Codex (ChatGPT Plus/Pro account session):
 
 ```sh
+# Legacy Codex CLI bridge (kept for compatibility)
 export COCOA_PROVIDER="codex"
 export COCOA_CODEX_BINARY="codex"           # optional
 export COCOA_CODEX_MODEL="o3-mini"          # optional
 export COCOA_CODEX_SANDBOX="read-only"      # optional
 export COCOA_CODEX_APPROVAL="never"         # optional
 export COCOA_CODEX_TIMEOUT_SECONDS="60"     # optional
+
+# Recommended Codex HTTP mode (no local CLI process)
+export COCOA_PROVIDER="codex-http"          # or codex-responses / openai-codex
+export COCOA_CODEX_API_KEY="..."            # OAuth/API token
+export COCOA_CODEX_MODEL="gpt-5-codex"     # required
+export COCOA_CODEX_BASE_URL="https://chatgpt.com/backend-api/codex"  # optional
+export COCOA_CODEX_TIMEOUT_SECONDS="60"     # optional
 ```
 
-Optional Codex mapping:
+Optional Codex CLI bridge mapping:
 
 - `COCOA_CODEX_HOME` maps to `CODEX_HOME` so you can point to a custom auth/session home.
 - `COCOA_CODEX_BINARY` changes the executable path.
 - `COCOA_CODEX_SANDBOX` supports `read-only`, `workspace-write`, `danger-full-access`.
 - `COCOA_CODEX_APPROVAL` supports `untrusted`, `on-failure`, `on-request`, `never`.
+
+Optional Codex HTTP env:
+
+- `COCOA_CODEX_API_KEY` (recommended)
+- `COCOA_CODEX_BASE_URL` (defaults to `https://chatgpt.com/backend-api/codex`)
+- `COCOA_CODEX_TEMPERATURE`
+- `COCOA_CODEX_MAX_TOKENS`
 
 `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL` are accepted as
 fallbacks when `COCOA_PROVIDER=openai`. The provider only returns model text;

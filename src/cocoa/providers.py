@@ -84,6 +84,50 @@ class OpenAICompatibleConfig:
 
 
 @dataclass(frozen=True)
+class CodexResponsesConfig:
+    api_key: str
+    model: str
+    base_url: str = "https://chatgpt.com/backend-api/codex"
+    timeout_seconds: float = 60.0
+    temperature: float | None = None
+    max_tokens: int | None = None
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] = os.environ) -> "CodexResponsesConfig | None":
+        provider = env.get("COCOA_PROVIDER", "stub").lower()
+        if provider not in {"codex-http", "codex-responses", "openai-codex"}:
+            return None
+
+        api_key = (
+            env.get("COCOA_CODEX_API_KEY")
+            or env.get("OPENAI_API_KEY")
+            or env.get("OPENAI_API_TOKEN")
+        )
+        model = env.get("COCOA_CODEX_MODEL") or env.get("OPENAI_MODEL")
+        if not api_key or not model:
+            missing = []
+            if not api_key:
+                missing.append("COCOA_CODEX_API_KEY or OPENAI_API_KEY")
+            if not model:
+                missing.append("COCOA_CODEX_MODEL or OPENAI_MODEL")
+            raise ProviderConfigurationError("missing " + ", ".join(missing))
+
+        base_url = env.get("COCOA_CODEX_BASE_URL") or env.get("OPENAI_BASE_URL")
+        timeout_raw = env.get("COCOA_CODEX_TIMEOUT_SECONDS")
+        temperature_raw = env.get("COCOA_CODEX_TEMPERATURE")
+        max_tokens_raw = env.get("COCOA_CODEX_MAX_TOKENS")
+
+        return cls(
+            api_key=api_key,
+            model=model,
+            base_url=(base_url or cls.base_url).rstrip("/"),
+            timeout_seconds=float(timeout_raw) if timeout_raw else cls.timeout_seconds,
+            temperature=float(temperature_raw) if temperature_raw else None,
+            max_tokens=int(max_tokens_raw) if max_tokens_raw else None,
+        )
+
+
+@dataclass(frozen=True)
 class CodexConfig:
     binary: str = "codex"
     model: str | None = None
@@ -240,9 +284,187 @@ class OpenAICompatibleProvider:
             data = json.loads(body)
         except json.JSONDecodeError:
             return body[:500] or "(empty error body)"
-        error = data.get("error")
-        if isinstance(error, dict) and isinstance(error.get("message"), str):
-            return error["message"]
+        if isinstance(data, dict):
+            error = data.get("error")
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                return error["message"]
+        return body[:500] or "(empty error body)"
+
+
+class CodexResponsesProvider:
+    def __init__(self, config: CodexResponsesConfig) -> None:
+        self.config = config
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        return self._complete_sync(request)
+
+    def _complete_sync(self, request: ProviderRequest) -> ProviderResponse:
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "input": self._format_user_prompt(request),
+        }
+        payload["instructions"] = (
+            "You are cocoa, a terminal-native coding assistant. "
+            "Return concise, actionable responses. Do not claim to have changed files or "
+            "run commands unless the cocoa runtime did it."
+        )
+        if self.config.temperature is not None:
+            payload["temperature"] = self.config.temperature
+        if self.config.max_tokens is not None:
+            payload["max_output_tokens"] = self.config.max_tokens
+
+        body = json.dumps(payload).encode("utf-8")
+        http_request = urllib.request.Request(
+            f"{self.config.base_url.rstrip('/')}/responses",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                http_request,
+                timeout=self.config.timeout_seconds,
+            ) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            try:
+                error_body = exc.read().decode("utf-8", errors="replace")
+            finally:
+                exc.close()
+            raise ProviderHTTPError(
+                f"provider HTTP {exc.code}: {self._extract_error_message(error_body)}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ProviderHTTPError(f"provider connection failed: {exc.reason}") from exc
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ProviderResponseError("provider returned invalid JSON") from exc
+
+        message = self._extract_message(data)
+        summary = message[:80] if isinstance(message, str) else None
+        if not isinstance(message, str):
+            raise ProviderResponseError("provider response missing text content")
+        if not message.strip():
+            raise ProviderResponseError("provider returned empty response")
+        return ProviderResponse(message=message, summary=summary)
+
+    def _format_user_prompt(self, request: ProviderRequest) -> str:
+        return (
+            f"Workspace: {request.cwd}\n"
+            f"Thread: {request.thread_id}\n"
+            f"Turn: {request.turn_id}\n\n"
+            + (
+                f"Recent thread context:\n{request.thread_context}\n\n"
+                if request.thread_context
+                else ""
+            )
+            + request.prompt
+        )
+
+    def _extract_message(self, data: dict[str, Any]) -> str:
+        if self._response_has_failure(data):
+            raise ProviderResponseError(self._extract_error_message(json.dumps(data)))
+
+        output = data.get("output")
+        if isinstance(output, list):
+            text = self._extract_output_text(output)
+            if text:
+                return text
+
+        if isinstance(data.get("output_text"), str):
+            out = data.get("output_text").strip()
+            if out:
+                return out
+
+        if self._is_chat_completion_style(data):
+            return self._extract_chat_completion_like_message(data)
+
+        raise ProviderResponseError("provider response missing text content")
+
+    def _response_has_failure(self, data: dict[str, Any]) -> bool:
+        status = data.get("status")
+        if isinstance(status, str) and status.strip().lower() in {"failed", "cancelled", "error"}:
+            return True
+        error_obj = data.get("error")
+        if isinstance(error_obj, dict) and error_obj.get("message"):
+            return True
+        return False
+
+    def _extract_output_text(self, output: list[Any]) -> str:
+        pieces: list[str] = []
+        for raw_item in output:
+            if not isinstance(raw_item, dict):
+                continue
+            item_type = raw_item.get("type")
+            if item_type == "output_text":
+                text = raw_item.get("text")
+                if isinstance(text, str) and text.strip():
+                    pieces.append(text)
+                continue
+            if item_type == "message":
+                message_content = raw_item.get("content")
+                if isinstance(message_content, list):
+                    for raw_part in message_content:
+                        if not isinstance(raw_part, dict):
+                            continue
+                        part_type = raw_part.get("type")
+                        if part_type not in {"output_text", "text"}:
+                            continue
+                        text = raw_part.get("text")
+                        if isinstance(text, str) and text.strip():
+                            pieces.append(text)
+        return "".join(pieces).strip()
+
+    def _is_chat_completion_style(self, data: dict[str, Any]) -> bool:
+        choices = data.get("choices")
+        if isinstance(choices, list):
+            return True
+        message = data.get("message")
+        if isinstance(message, dict) and message.get("content"):
+            return True
+        return False
+
+    def _extract_chat_completion_like_message(self, data: dict[str, Any]) -> str:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ProviderResponseError("provider response missing choices")
+        first = choices[0]
+        if not isinstance(first, dict):
+            raise ProviderResponseError("provider response has invalid choice")
+        message = first.get("message")
+        if not isinstance(message, dict):
+            raise ProviderResponseError("provider response missing message")
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            if parts:
+                return "\n".join(parts)
+        raise ProviderResponseError("provider response missing text content")
+
+    def _extract_error_message(self, body: str) -> str:
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            return body[:500] or "(empty error body)"
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("error"), dict):
+                error = parsed["error"]
+                if isinstance(error.get("message"), str):
+                    return error["message"]
+            message = parsed.get("message")
+            if isinstance(message, str):
+                return message
         return body[:500] or "(empty error body)"
 
 
@@ -440,6 +662,8 @@ def provider_from_env(env: Mapping[str, str] = os.environ) -> ProviderAdapter:
         if config is None:
             raise ProviderConfigurationError("missing OpenAI configuration")
         return OpenAICompatibleProvider(config)
+    if provider in {"codex-http", "codex-responses", "openai-codex"}:
+        return CodexResponsesProvider(CodexResponsesConfig.from_env(env))
     if provider == "codex":
         return CodexProvider(CodexConfig.from_env(env))
     raise ProviderConfigurationError(f"unsupported provider: {provider}")
@@ -454,6 +678,11 @@ def provider_name_from_env(env: Mapping[str, str] = os.environ) -> str:
         if config is None:
             raise ProviderConfigurationError("missing OpenAI configuration")
         return f"openai-compatible:{config.model}"
+    if provider in {"codex-http", "codex-responses", "openai-codex"}:
+        config = CodexResponsesConfig.from_env(env)
+        if config is None:
+            raise ProviderConfigurationError("missing OpenAI-compatible configuration")
+        return f"codex-http:{config.model}"
     if provider == "codex":
         config = CodexConfig.from_env(env)
         if config.model:

@@ -50,7 +50,8 @@ protocol.
 Expected provider adapters:
 
 - OpenAI-compatible Chat Completions HTTP
-- Codex CLI bridge (`codex exec --json`)
+- Codex CLI bridge (`codex exec --json`) for compatibility
+- Codex HTTP bridge (`/responses`) via `openai-codex` / `codex-http`
 - local model runner
 - external CLI bridge
 

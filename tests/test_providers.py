@@ -15,6 +15,8 @@ from cocoa.providers import (
     OpenAICompatibleConfig,
     CodexConfig,
     CodexProvider,
+    CodexResponsesConfig,
+    CodexResponsesProvider,
     OpenAICompatibleProvider,
     ProviderConfigurationError,
     ProviderHTTPError,
@@ -234,6 +236,109 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual(provider.__class__.__name__, "CodexProvider")
         self.assertEqual(provider_name_from_env(env), "codex:codex-model")
+
+    def test_provider_env_builds_codex_http_provider(self) -> None:
+        env = {
+            "COCOA_PROVIDER": "codex-http",
+            "COCOA_CODEX_API_KEY": "token",
+            "COCOA_CODEX_MODEL": "codex-model",
+            "COCOA_CODEX_BASE_URL": "https://example.test/backend-api/codex",
+            "COCOA_CODEX_TIMEOUT_SECONDS": "12",
+        }
+        provider = provider_from_env(env)
+        self.assertEqual(provider.__class__.__name__, "CodexResponsesProvider")
+        self.assertEqual(provider_name_from_env(env), "codex-http:codex-model")
+
+    def test_provider_env_builds_codex_http_provider_alias_openai_codex(self) -> None:
+        env = {
+            "COCOA_PROVIDER": "openai-codex",
+            "OPENAI_API_KEY": "token",
+            "OPENAI_MODEL": "gpt-5-codex",
+        }
+        provider = provider_from_env(env)
+        self.assertEqual(provider.__class__.__name__, "CodexResponsesProvider")
+        self.assertEqual(provider_name_from_env(env), "codex-http:gpt-5-codex")
+
+    def test_codex_responses_provider_calls_responses_endpoint(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(request, timeout: float):
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeHTTPResponse(
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "text", "text": "from responses api"},
+                            ],
+                        }
+                    ]
+                }
+            )
+
+        config = CodexResponsesConfig(
+            api_key="token",
+            model="codex-model",
+            base_url="https://api.test/backend-api/codex",
+            timeout_seconds=4.0,
+        )
+        provider = CodexResponsesProvider(config)
+        request = ProviderRequest(
+            thread_id="thr_responses",
+            turn_id="turn_responses",
+            prompt="hello responses",
+            cwd="/tmp/project",
+            thread_context="User: first\nAssistant: done",
+        )
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            response = asyncio.run(provider.complete(request))
+
+        self.assertEqual(response.message, "from responses api")
+        self.assertEqual(captured["url"], "https://api.test/backend-api/codex/responses")
+        self.assertEqual(captured["timeout"], 4.0)
+        payload = captured["payload"]  # type: ignore[assignment]
+        self.assertEqual(payload["model"], "codex-model")
+        self.assertEqual(payload["instructions"], (
+            "You are cocoa, a terminal-native coding assistant. "
+            "Return concise, actionable responses. Do not claim to have changed files or "
+            "run commands unless the cocoa runtime did it."
+        ))
+        self.assertEqual(payload["input"], "Workspace: /tmp/project\nThread: thr_responses\nTurn: turn_responses\n\n"
+                                         "Recent thread context:\nUser: first\nAssistant: done\n\nhello responses")
+
+    def test_codex_responses_provider_falls_back_to_chat_completion_style(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(request, timeout: float):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeHTTPResponse(
+                {
+                    "choices": [
+                        {"message": {"content": "legacy-style responses"}}
+                    ]
+                }
+            )
+
+        config = CodexResponsesConfig(api_key="token", model="codex-model")
+        provider = CodexResponsesProvider(config)
+        request = ProviderRequest(
+            thread_id="thr_responses_chat",
+            turn_id="turn_responses_chat",
+            prompt="hello",
+            cwd="/tmp/project",
+        )
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            response = asyncio.run(provider.complete(request))
+
+        self.assertEqual(response.message, "legacy-style responses")
+        self.assertEqual(captured["payload"]["input"], (
+            "Workspace: /tmp/project\nThread: thr_responses_chat\nTurn: turn_responses_chat\n\nhello"
+        ))
 
     def test_codex_provider_builds_command_and_extracts_message(self) -> None:
         captured: dict[str, object] = {}
