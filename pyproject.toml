@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cocoa-agent"
+version = "0.1.0"
+description = "Terminal-native agentic coding system."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "0x07c4" }]
+keywords = ["agent", "cli", "coding-agent", "terminal"]
+dependencies = []
+
+[project.optional-dependencies]
+ui = ["prompt-toolkit>=3.0", "rich>=13.0", "typer>=0.12"]
+dev = ["mypy>=1.10", "pytest>=8.0"]
+
+[project.scripts]
+cocoa = "cocoa.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cocoa"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/cocoa"]
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_ignores = true
