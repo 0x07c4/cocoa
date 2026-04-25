@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .providers import ProviderConfigurationError, provider_from_env, provider_name_from_env
+from .providers import ProviderConfigurationError, StubProvider, provider_from_env, provider_name_from_env
 from .runtime import AgentRuntime
 from .store import JsonlStore
 from .tools import ConsoleApprovalPrompter, ShellTool
@@ -157,7 +157,13 @@ async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
 
 
 async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
-    runtime, store = make_runtime(cwd)
+    try:
+        runtime, store = make_runtime(cwd)
+        provider_status = _resolve_provider_status()
+    except ProviderConfigurationError as exc:
+        provider_status = f"not configured ({exc})"
+        store = JsonlStore.for_workspace(cwd)
+        runtime = AgentRuntime(store=store, provider=StubProvider())
     if thread_id is None:
         thread = runtime.start_thread(cwd, title="repl")
     else:
@@ -166,7 +172,6 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
 
     print(f"cocoa {__version__}")
     print(f"thread: {thread.id}")
-    provider_status = _resolve_provider_status()
     print(f"provider: {provider_status}")
     if not _is_provider_configured():
         print("provider not ready, type /configure for setup, /help for commands")

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import io
+from contextlib import redirect_stdout
+from pathlib import Path
 import os
 from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
 
 from cocoa.cli import (
+    run_repl,
     _is_provider_configured,
     _resolve_provider_model,
     _resolve_provider_status,
@@ -77,6 +82,16 @@ class CliTests(unittest.TestCase):
             model = _resolve_provider_model()
         self.assertEqual(model, "codex-mini")
 
+    def test_repl_runs_with_invalid_provider_as_stub(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"COCOA_PROVIDER": "openai"}, clear=True):
+                with mock.patch("builtins.input", side_effect=["/exit"]):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=Path(tmpdir)))
+            logs = output.getvalue()
+        self.assertIn("provider: not configured (missing", logs)
+        self.assertIn("provider not ready, type /configure for setup", logs)
 
 if __name__ == "__main__":
     unittest.main()
