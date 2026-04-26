@@ -47,6 +47,8 @@ _MAX_WORKSPACE_MAP_ENTRIES = 80
 _MAX_CONTEXT_REFERENCES = 6
 _MAX_CONTEXT_FILE_BYTES = 32_000
 _MAX_WORKSPACE_CONTEXT_CHARS = 90_000
+_MAX_THREAD_CONTEXT_CHARS = 48_000
+_MAX_CONTEXT_FIELD_CHARS = 4_000
 
 
 class AgentRuntime:
@@ -1076,54 +1078,180 @@ class AgentRuntime:
         max_turns: int = 6,
         skip_turn_id: str,
     ) -> str | None:
-        pairs: list[tuple[str, str]] = []
-        turns: dict[str, dict[str, str]] = {}
+        item_data: dict[str, dict[str, Any]] = {}
+        item_order_by_turn: dict[str, list[str]] = {}
         turn_order: list[str] = []
 
         for row in self.store.read_thread(thread.id):
-            if row.get("kind") != "item_completed":
-                continue
+            row_kind = row.get("kind")
             payload = row.get("payload")
             if not isinstance(payload, dict):
                 continue
+
+            if row_kind in {"turn_started", "turn_completed"}:
+                raw_turn = payload.get("turn")
+                if not isinstance(raw_turn, dict):
+                    continue
+                turn_id = raw_turn.get("id")
+                if not isinstance(turn_id, str) or turn_id == skip_turn_id:
+                    continue
+                if turn_id not in turn_order:
+                    turn_order.append(turn_id)
+                continue
+
+            if row_kind not in {
+                "approval_requested",
+                "item_started",
+                "item_updated",
+                "item_completed",
+            }:
+                continue
+
             item = payload.get("item")
             if not isinstance(item, dict):
                 continue
+            item_id = item.get("id")
             turn_id = item.get("turn_id")
-            if not isinstance(turn_id, str) or turn_id == skip_turn_id:
+            if not isinstance(item_id, str) or not isinstance(turn_id, str):
                 continue
-
-            kind = item.get("kind")
-            if kind not in {"user_message", "agent_message"}:
+            if turn_id == skip_turn_id:
                 continue
-
-            text = self._read_item_text(item)
-            if text is None:
-                continue
-
-            turn = turns.setdefault(turn_id, {})
             if turn_id not in turn_order:
                 turn_order.append(turn_id)
-            turn[kind if kind == "user_message" else "assistant"] = text
+            item_order = item_order_by_turn.setdefault(turn_id, [])
+            if item_id not in item_order:
+                item_order.append(item_id)
+            current = item_data.get(item_id, {})
+            current.update(item)
+            item_data[item_id] = current
 
+        turn_sections: list[list[str]] = []
         for turn_id in turn_order:
-            pair = turns.get(turn_id, {})
-            user_text = pair.get("user_message")
-            assistant_text = pair.get("assistant")
-            if user_text is not None and assistant_text is not None:
-                pairs.append((user_text, assistant_text))
+            lines: list[str] = []
+            for item_id in item_order_by_turn.get(turn_id, []):
+                item = item_data.get(item_id)
+                if item is None:
+                    continue
+                lines.extend(self._context_lines_for_item(item))
+            if lines:
+                turn_sections.append(lines)
 
-        if not pairs:
+        if not turn_sections:
             return None
 
-        selected = pairs[-max_turns:]
-        lines: list[str] = []
-        for index, (user_text, assistant_text) in enumerate(selected, 1):
-            lines.append(f"Turn {index}:")
-            lines.append(f"User: {user_text}")
-            lines.append(f"Assistant: {assistant_text}")
-            lines.append("")
-        return "\n".join(lines).strip()
+        selected = turn_sections[-max_turns:]
+        context_lines: list[str] = []
+        for index, turn_lines in enumerate(selected, 1):
+            context_lines.append(f"Turn {index}:")
+            context_lines.extend(turn_lines)
+            context_lines.append("")
+        context = "\n".join(context_lines).strip()
+        if len(context) > _MAX_THREAD_CONTEXT_CHARS:
+            context = (
+                "[older thread context truncated by cocoa]\n\n"
+                + context[-_MAX_THREAD_CONTEXT_CHARS:]
+            )
+        return context
+
+    def _context_lines_for_item(self, item: dict[str, Any]) -> list[str]:
+        kind = item.get("kind")
+        status = item.get("status")
+        content = item.get("content")
+        if not isinstance(content, dict):
+            content = {}
+
+        if kind == ItemKind.USER_MESSAGE.value:
+            text = self._read_item_text(item)
+            return [f"User: {text}"] if text is not None else []
+        if kind == ItemKind.AGENT_MESSAGE.value:
+            text = self._read_item_text(item)
+            return [f"Assistant: {text}"] if text is not None else []
+        if kind == ItemKind.COMMAND.value:
+            return self._command_context_lines(item, content)
+        if kind == ItemKind.FILE_WRITE.value:
+            return self._file_write_context_lines(item, content)
+        if kind == ItemKind.FILE_READ.value:
+            path = content.get("path")
+            if not isinstance(path, str):
+                return []
+            if status == ItemStatus.FAILED.value:
+                error = content.get("error")
+                suffix = f" error={error}" if isinstance(error, str) and error else ""
+                return [f"File read failed: {path}{suffix}"]
+            size = content.get("size")
+            truncated = content.get("truncated") is True
+            details = f" size={size}" if isinstance(size, int) else ""
+            if truncated:
+                details += " truncated=true"
+            return [f"File read: {path}{details}"]
+        if kind == ItemKind.WORKSPACE_INSPECT.value:
+            path = content.get("path")
+            entries = content.get("entries")
+            count = len(entries) if isinstance(entries, list) else 0
+            return [f"Workspace inspect: {path} entries={count}"] if isinstance(path, str) else []
+        return []
+
+    def _command_context_lines(
+        self,
+        item: dict[str, Any],
+        content: dict[str, Any],
+    ) -> list[str]:
+        command = content.get("command")
+        if not isinstance(command, str):
+            return []
+        status = item.get("status")
+        approval = item.get("approval")
+        lines = [f"Command ({status}, approval={approval}): {command}"]
+        exit_code = content.get("exit_code")
+        timed_out = content.get("timed_out")
+        if isinstance(exit_code, int) or exit_code is None:
+            lines.append(f"exit_code: {exit_code}")
+        if timed_out is True:
+            lines.append("timed_out: true")
+        stdout = content.get("stdout")
+        stderr = content.get("stderr")
+        error = content.get("error")
+        if isinstance(stdout, str) and stdout:
+            lines.append("stdout:")
+            lines.append(self._clip_context_field(stdout))
+        if isinstance(stderr, str) and stderr:
+            lines.append("stderr:")
+            lines.append(self._clip_context_field(stderr))
+        if isinstance(error, str) and error:
+            lines.append(f"error: {self._clip_context_field(error)}")
+        return lines
+
+    def _file_write_context_lines(
+        self,
+        item: dict[str, Any],
+        content: dict[str, Any],
+    ) -> list[str]:
+        path = content.get("path")
+        if not isinstance(path, str):
+            return []
+        status = item.get("status")
+        approval = item.get("approval")
+        operation = content.get("operation", "write")
+        label = "File edit" if operation == "replace" else "File write"
+        lines = [f"{label} ({status}, approval={approval}): {path}"]
+        scope_error = content.get("scope_error")
+        if isinstance(scope_error, str) and scope_error:
+            lines.append(f"cannot_apply: {scope_error}")
+        bytes_written = content.get("bytes_written")
+        if isinstance(bytes_written, int):
+            lines.append(f"bytes_written: {bytes_written}")
+        previous_exists = content.get("previous_exists")
+        if isinstance(previous_exists, bool):
+            lines.append(f"previous_exists: {str(previous_exists).lower()}")
+        return lines
+
+    def _clip_context_field(self, text: str) -> str:
+        if len(text) <= _MAX_CONTEXT_FIELD_CHARS:
+            return text.rstrip()
+        return (
+            text[:_MAX_CONTEXT_FIELD_CHARS].rstrip()
+            + "\n[output truncated by cocoa]"
+        )
 
     def _read_item_text(self, item: dict[str, Any]) -> str | None:
         content = item.get("content")
@@ -1131,7 +1259,7 @@ class AgentRuntime:
             return None
         text = content.get("text")
         if isinstance(text, str):
-            return text.strip()
+            return self._clip_context_field(text.strip())
         return None
 
     def _build_thread_from_payload(self, raw_thread: dict[str, Any]) -> ThreadRecord:

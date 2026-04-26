@@ -224,6 +224,95 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("User: first", request.thread_context)
             self.assertIn("Assistant: echo:first", request.thread_context)
 
+    def test_runtime_reuses_command_results_in_thread_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+            shell = ShellTool(AlwaysApprovePrompter())
+            command = (
+                f"{shlex.quote(sys.executable)} -c "
+                "\"import sys; print('tool stdout'); print('tool stderr', file=sys.stderr); raise SystemExit(7)\""
+            )
+            asyncio.run(runtime.run_shell_turn(thread, command, shell))
+
+            asyncio.run(runtime.run_user_turn(thread, "what failed?"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.thread_context)
+            context = request.thread_context or ""
+            self.assertIn("User: /run", context)
+            self.assertIn("Command (failed", context)
+            self.assertIn("exit_code: 7", context)
+            self.assertIn("tool stdout", context)
+            self.assertIn("tool stderr", context)
+
+    def test_runtime_reuses_file_write_results_in_thread_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            proposal_runtime = AgentRuntime(store, FileProposalProvider())
+            thread = proposal_runtime.start_thread(tmp_path)
+            turn_result = asyncio.run(
+                proposal_runtime.run_user_turn_with_result(thread, "write file")
+            )
+            proposal_runtime.apply_proposed_file_write(thread, turn_result.proposals[0].id)
+
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            asyncio.run(runtime.run_user_turn(thread, "what changed?"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.thread_context)
+            context = request.thread_context or ""
+            self.assertIn("File write (completed, approval=accepted): hello.txt", context)
+            self.assertIn("bytes_written:", context)
+
+    def test_runtime_reuses_unusable_pending_edit_in_thread_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        class AmbiguousEditProvider:
+            async def complete(self, request: ProviderRequest) -> ProviderResponse:
+                proposal = {
+                    "edits": [
+                        {
+                            "path": "hello.txt",
+                            "old": "hello",
+                            "new": "hi",
+                            "reason": "ambiguous",
+                        }
+                    ]
+                }
+                return ProviderResponse(
+                    message="bad edit\n```cocoa-proposal\n"
+                    f"{json.dumps(proposal)}\n```",
+                    summary="bad edit",
+                )
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "hello.txt").write_text("hello\nhello\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            proposal_runtime = AgentRuntime(store, AmbiguousEditProvider())
+            thread = proposal_runtime.start_thread(tmp_path)
+            asyncio.run(proposal_runtime.run_user_turn_with_result(thread, "edit file"))
+
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            asyncio.run(runtime.run_user_turn(thread, "try again"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.thread_context)
+            context = request.thread_context or ""
+            self.assertIn("File edit (pending", context)
+            self.assertIn("cannot_apply: old text matched 2 times", context)
+
     def test_runtime_includes_workspace_map_context(self) -> None:
         from tempfile import TemporaryDirectory
 
