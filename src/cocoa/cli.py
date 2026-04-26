@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import __version__
+from .models import ItemRecord
 from .projection import ItemView, TurnView, load_thread_view
 from .providers import (
     ProviderConfigurationError,
@@ -28,6 +29,7 @@ from .tools import ConsoleApprovalPrompter, ShellTool
 from .workspace import WorkspaceScope
 
 _REPL_COMMANDS = (
+    "/accept",
     "/configure",
     "/exit",
     "/help",
@@ -47,6 +49,7 @@ _CONFIGURE_MODES = ("clear", "codex-http", "openai")
 _SET_OPTIONS = ("--persist", "-p")
 
 _REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
+    "/accept": "run pending command",
     "/configure": "configure provider",
     "/exit": "quit cocoa",
     "/help": "show commands",
@@ -74,6 +77,7 @@ _SET_OPTION_DESCRIPTIONS: Mapping[str, str] = {
 }
 
 _COMMANDS_EXPECTING_ARGUMENTS = {
+    "/accept",
     "/configure",
     "/inspect",
     "/run",
@@ -386,6 +390,12 @@ def _completion_candidates(
             for candidate in _show_completion_candidates(store, thread_id)
             if candidate.startswith(text)
         ]
+    if command == "/accept":
+        return [
+            candidate
+            for candidate in _pending_command_completion_candidates(store, thread_id)
+            if candidate.startswith(text)
+        ]
     if command == "/inspect":
         return _workspace_path_completion_candidates(cwd, text)
     return []
@@ -466,6 +476,8 @@ def _completion_description(line: str, candidate: str) -> str:
         if candidate.startswith("item_"):
             return "item projection"
         return "projection target"
+    if command == "/accept":
+        return "pending command"
     if command == "/inspect":
         return "workspace path"
     return ""
@@ -514,6 +526,23 @@ def _show_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
         candidates.append(turn.id)
         for item in turn.items:
             candidates.append(item.id)
+    return candidates
+
+
+def _pending_command_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
+    try:
+        view = load_thread_view(store, thread_id)
+    except ValueError:
+        return []
+    candidates: list[str] = []
+    for turn in view.turns:
+        for item in turn.items:
+            if (
+                item.kind == "command"
+                and item.status == "pending"
+                and item.approval == "requested"
+            ):
+                candidates.append(item.id)
     return candidates
 
 
@@ -1104,14 +1133,29 @@ def _print_provider_config_help() -> None:
     print("/set --persist KEY VALUE")
 
 
+def _print_command_proposals(proposals: tuple[ItemRecord, ...]) -> None:
+    if not proposals:
+        return
+    print()
+    print("proposals:")
+    for item in proposals:
+        command = item.content.get("command")
+        reason = item.content.get("reason")
+        print(f"  {item.id}: {command}")
+        if isinstance(reason, str) and reason:
+            print(f"    reason: {reason}")
+        print(f"    run: /accept {item.id}")
+
+
 async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
     runtime, store = make_runtime(cwd)
     if thread_id is None:
         thread = runtime.start_thread(cwd, title=prompt[:80])
     else:
         thread = runtime.resume_thread(thread_id)
-    message = await runtime.run_user_turn(thread, prompt)
-    print(message)
+    result = await runtime.run_user_turn_with_result(thread, prompt)
+    print(result.message)
+    _print_command_proposals(result.proposals)
     print()
     print(f"thread: {thread.id}")
     print(f"log: {store.thread_path(thread.id)}")
@@ -1170,6 +1214,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("/persist            persist current session overrides to .cocoa/config.env")
                 print("/history            show turns in current thread")
                 print("/show <id|last>     show a turn or item projection")
+                print("/accept <item_id>   run a pending command proposal")
                 print("/inspect [path]     list workspace files")
                 print("/run <command>      run shell command after approval")
                 print("/exit               quit")
@@ -1280,6 +1325,24 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     continue
                 print_show(store, thread.id, target)
                 continue
+            if line == "/accept" or line.startswith("/accept "):
+                _, _, target = line.partition(" ")
+                target = target.strip()
+                if not target:
+                    print("usage: /accept <item_id>")
+                    continue
+                try:
+                    result = await runtime.run_proposed_command(thread, target, shell)
+                except ValueError as exc:
+                    print(str(exc))
+                    continue
+                if result.stdout:
+                    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+                if result.stderr:
+                    print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
+                if result.exit_code is not None:
+                    print(f"exit_code: {result.exit_code}")
+                continue
             if line == "/provider":
                 print(f"provider: {_resolve_provider_status_for_env(env)}")
                 continue
@@ -1307,8 +1370,9 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("unknown command. type /help for commands.")
                 continue
 
-            message = await runtime.run_user_turn(thread, line)
-            print(message)
+            result = await runtime.run_user_turn_with_result(thread, line)
+            print(result.message)
+            _print_command_proposals(result.proposals)
     finally:
         repl_input.close()
     print(f"log: {store.thread_path(thread.id)}")

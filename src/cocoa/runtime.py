@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 from .models import (
@@ -18,8 +19,15 @@ from .models import (
     now_ms,
 )
 from .providers import ProviderAdapter, ProviderRequest
+from .proposals import CommandProposal, parse_command_proposals
 from .store import JsonlStore
 from .tools import CommandResult, ShellTool
+
+
+@dataclass(frozen=True)
+class UserTurnResult:
+    message: str
+    proposals: tuple[ItemRecord, ...] = ()
 
 
 class AgentRuntime:
@@ -120,6 +128,14 @@ class AgentRuntime:
         return completed
 
     async def run_user_turn(self, thread: ThreadRecord, prompt: str) -> str:
+        result = await self.run_user_turn_with_result(thread, prompt)
+        return result.message
+
+    async def run_user_turn_with_result(
+        self,
+        thread: ThreadRecord,
+        prompt: str,
+    ) -> UserTurnResult:
         turn = self.start_turn(thread, intent="conversation", user_text=prompt)
         context = self._build_thread_context(thread, skip_turn_id=turn.id)
         try:
@@ -149,16 +165,20 @@ class AgentRuntime:
             )
             raise
 
+        message, command_proposals = parse_command_proposals(response.message)
+        if not message:
+            message = response.message.strip()
+
         agent_item = ItemRecord(
             id=new_id("item"),
             thread_id=thread.id,
             turn_id=turn.id,
             kind=ItemKind.AGENT_MESSAGE,
             status=ItemStatus.COMPLETED,
-            content={"text": response.message},
+            content={"text": message},
             completed_at_ms=now_ms(),
         )
-        self.store.append(
+        events = [
             event(
                 EventKind.ITEM_COMPLETED,
                 thread_id=thread.id,
@@ -166,14 +186,29 @@ class AgentRuntime:
                 item_id=agent_item.id,
                 payload={"item": agent_item},
             )
+        ]
+        proposal_items = tuple(
+            self._command_proposal_item(thread, turn, proposal)
+            for proposal in command_proposals
         )
+        for item in proposal_items:
+            events.append(
+                event(
+                    EventKind.APPROVAL_REQUESTED,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    item_id=item.id,
+                    payload={"item": item},
+                )
+            )
+        self.store.append_many(events)
         self.complete_turn(
             thread,
             turn,
             status=TurnStatus.COMPLETED,
             summary=response.summary,
         )
-        return response.message
+        return UserTurnResult(message=message, proposals=proposal_items)
 
     async def run_shell_turn(
         self,
@@ -296,6 +331,150 @@ class AgentRuntime:
             summary=f"command: {command}",
         )
         return result
+
+    async def run_proposed_command(
+        self,
+        thread: ThreadRecord,
+        item_id: str,
+        shell: ShellTool,
+    ) -> CommandResult:
+        pending_item = self._find_pending_command(thread, item_id)
+        command = pending_item.content.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError(f"invalid command proposal: {item_id}")
+        try:
+            result = await shell.run(command, Path(thread.cwd))
+        except Exception as exc:
+            failed_item = ItemRecord(
+                id=pending_item.id,
+                thread_id=thread.id,
+                turn_id=pending_item.turn_id,
+                kind=ItemKind.COMMAND,
+                status=ItemStatus.FAILED,
+                content={**pending_item.content, "error": str(exc)},
+                approval=ApprovalState.REQUESTED,
+                created_at_ms=pending_item.created_at_ms,
+                completed_at_ms=now_ms(),
+            )
+            self.store.append_many(
+                [
+                    event(
+                        EventKind.ERROR,
+                        thread_id=thread.id,
+                        turn_id=pending_item.turn_id,
+                        item_id=pending_item.id,
+                        payload={"message": str(exc), "type": type(exc).__name__},
+                    ),
+                    event(
+                        EventKind.ITEM_COMPLETED,
+                        thread_id=thread.id,
+                        turn_id=pending_item.turn_id,
+                        item_id=failed_item.id,
+                        payload={"item": failed_item},
+                    ),
+                ]
+            )
+            raise
+
+        command_succeeded = result.approved and result.exit_code == 0 and not result.timed_out
+        final_item = ItemRecord(
+            id=pending_item.id,
+            thread_id=thread.id,
+            turn_id=pending_item.turn_id,
+            kind=ItemKind.COMMAND,
+            status=(
+                ItemStatus.COMPLETED
+                if command_succeeded
+                else ItemStatus.FAILED
+                if result.approved
+                else ItemStatus.REJECTED
+            ),
+            content={
+                **pending_item.content,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "timed_out": result.timed_out,
+            },
+            approval=ApprovalState.ACCEPTED if result.approved else ApprovalState.REJECTED,
+            created_at_ms=pending_item.created_at_ms,
+            completed_at_ms=now_ms(),
+        )
+        self.store.append_many(
+            [
+                event(
+                    EventKind.APPROVAL_RESOLVED,
+                    thread_id=thread.id,
+                    turn_id=pending_item.turn_id,
+                    item_id=final_item.id,
+                    payload={"approved": result.approved},
+                ),
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread.id,
+                    turn_id=pending_item.turn_id,
+                    item_id=final_item.id,
+                    payload={"item": final_item},
+                ),
+            ]
+        )
+        return result
+
+    def _command_proposal_item(
+        self,
+        thread: ThreadRecord,
+        turn: TurnRecord,
+        proposal: CommandProposal,
+    ) -> ItemRecord:
+        content: dict[str, Any] = {
+            "command": proposal.command,
+            "cwd": thread.cwd,
+            "source": "provider_proposal",
+        }
+        if proposal.reason:
+            content["reason"] = proposal.reason
+        return ItemRecord(
+            id=new_id("item"),
+            thread_id=thread.id,
+            turn_id=turn.id,
+            kind=ItemKind.COMMAND,
+            status=ItemStatus.PENDING,
+            content=content,
+            approval=ApprovalState.REQUESTED,
+        )
+
+    def _find_pending_command(self, thread: ThreadRecord, item_id: str) -> ItemRecord:
+        item: dict[str, Any] | None = None
+        for row in self.store.read_thread(thread.id):
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            raw_item = payload.get("item")
+            if not isinstance(raw_item, dict) or raw_item.get("id") != item_id:
+                continue
+            item = raw_item
+        if item is None:
+            raise ValueError(f"command proposal not found: {item_id}")
+        if item.get("kind") != ItemKind.COMMAND.value:
+            raise ValueError(f"item is not a command proposal: {item_id}")
+        if item.get("status") != ItemStatus.PENDING.value:
+            raise ValueError(f"command proposal is not pending: {item_id}")
+        if item.get("approval") != ApprovalState.REQUESTED.value:
+            raise ValueError(f"command proposal is not awaiting approval: {item_id}")
+        return ItemRecord(
+            id=item_id,
+            thread_id=thread.id,
+            turn_id=str(item.get("turn_id")),
+            kind=ItemKind.COMMAND,
+            status=ItemStatus.PENDING,
+            content=dict(item.get("content") if isinstance(item.get("content"), dict) else {}),
+            approval=ApprovalState.REQUESTED,
+            created_at_ms=(
+                item.get("created_at_ms")
+                if isinstance(item.get("created_at_ms"), int)
+                else now_ms()
+            ),
+        )
 
     def _build_thread_context(
         self,

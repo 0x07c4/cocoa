@@ -424,11 +424,9 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(captured["timeout"], 4.0)
         payload = captured["payload"]  # type: ignore[assignment]
         self.assertEqual(payload["model"], "codex-model")
-        self.assertEqual(payload["instructions"], (
-            "You are cocoa, a terminal-native coding assistant. "
-            "Return concise, actionable responses. Do not claim to have changed files or "
-            "run commands unless the cocoa runtime did it."
-        ))
+        self.assertIn("You are cocoa, a terminal-native coding assistant.", payload["instructions"])
+        self.assertIn("run commands unless the cocoa runtime did it.", payload["instructions"])
+        self.assertIn("```cocoa-proposal", payload["instructions"])
         self.assertEqual(payload["store"], False)
         self.assertEqual(payload["stream"], True)
         self.assertEqual(payload["input"], "Workspace: /tmp/project\nThread: thr_responses\nTurn: turn_responses\n\n"

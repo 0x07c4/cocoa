@@ -22,6 +22,16 @@ _CODEX_DEFAULT_MODELS = [
     "gpt-5.2-codex",
 ]
 
+COCOA_DEVELOPER_INSTRUCTIONS = (
+    "You are cocoa, a terminal-native coding assistant. "
+    "Return concise, actionable responses. Do not claim to have changed files "
+    "or run commands unless the cocoa runtime did it. When a shell command "
+    "would help, propose it instead of claiming to run it by appending a fenced block "
+    "whose opening fence is exactly ```cocoa-proposal and whose JSON has this shape: "
+    "{\"commands\":[{\"command\":\"...\",\"reason\":\"...\"}]}. "
+    "The user decides whether cocoa executes proposed commands."
+)
+
 
 def _resolve_codex_models(
     api_key: str, base_url: str, *, timeout_seconds: float = 8.0
@@ -373,11 +383,7 @@ class OpenAICompatibleProvider:
             "messages": [
                 {
                     "role": "developer",
-                    "content": (
-                        "You are cocoa, a terminal-native coding assistant. "
-                        "Return concise, actionable responses. Do not claim to have "
-                        "changed files or run commands unless the cocoa runtime did it."
-                    ),
+                    "content": COCOA_DEVELOPER_INSTRUCTIONS,
                 },
                 {
                     "role": "user",
@@ -531,11 +537,7 @@ class CodexResponsesProvider:
             "input": self._format_user_prompt(request)
             if not as_list
             else self._build_responses_input_list(request),
-            "instructions": (
-                "You are cocoa, a terminal-native coding assistant. "
-                "Return concise, actionable responses. Do not claim to have changed files or "
-                "run commands unless the cocoa runtime did it."
-            ),
+            "instructions": COCOA_DEVELOPER_INSTRUCTIONS,
         }
         payload["store"] = False
         payload["stream"] = True
@@ -869,6 +871,9 @@ class CodexProvider:
 
     def _format_prompt(self, request: ProviderRequest) -> str:
         lines = [
+            "Developer instructions:",
+            COCOA_DEVELOPER_INSTRUCTIONS,
+            "",
             f"Workspace: {request.cwd}",
             f"Thread: {request.thread_id}",
             f"Turn: {request.turn_id}",

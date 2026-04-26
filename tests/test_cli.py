@@ -397,8 +397,8 @@ class CliTests(unittest.TestCase):
                 selected_index=1,
             )
 
-        self.assertTrue(lines[0].startswith("  /configure"))
-        self.assertTrue(lines[1].startswith("> /exit"))
+        self.assertTrue(lines[0].startswith("  /accept"))
+        self.assertTrue(lines[1].startswith("> /configure"))
 
     def test_repl_prompt_is_boxed_and_includes_status(self) -> None:
         prompt = _format_repl_prompt(

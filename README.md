@@ -42,6 +42,7 @@ PYTHONPATH=src python -m cocoa repl
 - `/persist`（保存当前会话内所有临时变量到 `.cocoa/config.env`）
 - `/history`（查看当前 thread 的 turn projection）
 - `/show <id|last>`（查看 turn 或 item projection）
+- `/accept <item_id>`（执行 provider 提出的 pending command proposal）
 
 `/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
 REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa-agent[ui]`
@@ -53,6 +54,16 @@ REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa
 或不支持 raw terminal 的环境会回退到普通 `input()`。
 
 `/provider` 会显示当前 provider，`/model` 会显示模型（未就绪时显示 `unknown`）。
+
+Provider 可以在普通文本后附一个 `cocoa-proposal` JSON block 来提出命令建议。
+`cocoa` 会把建议记录为 pending `COMMAND` item，只在用户执行 `/accept <item_id>`
+并通过确认后才运行：
+
+````markdown
+```cocoa-proposal
+{"commands":[{"command":"python -m unittest discover -s tests -q","reason":"verify changes"}]}
+```
+````
 
 Note:
 - If a valid codex auth token is available in COCOA_CODEX_API_KEY/CODEX auth file, cocoa will auto-select `codex-http` on first start.

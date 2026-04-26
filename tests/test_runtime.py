@@ -29,6 +29,21 @@ class CapturingProvider:
         )
 
 
+class ProposalProvider:
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        return ProviderResponse(
+            message=(
+                "I can run a verification command.\n\n"
+                "```cocoa-proposal\n"
+                "{\"commands\":[{\"command\":\""
+                f"{shlex.quote(sys.executable)} -c \\\"print('proposal')\\\""
+                "\",\"reason\":\"verify proposal execution\"}]}"
+                "\n```"
+            ),
+            summary="proposal",
+        )
+
+
 class RuntimeTests(unittest.TestCase):
     def test_runtime_records_user_turn(self) -> None:
         from tempfile import TemporaryDirectory
@@ -181,6 +196,48 @@ class RuntimeTests(unittest.TestCase):
 
             message = asyncio.run(runtime.run_user_turn(resumed, "again"))
             self.assertIn("Provider is not configured yet.", message)
+
+    def test_runtime_records_provider_command_proposals(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, ProposalProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(runtime.run_user_turn_with_result(thread, "verify"))
+            rows = store.read_thread(thread.id)
+
+            self.assertEqual(result.message, "I can run a verification command.")
+            self.assertEqual(len(result.proposals), 1)
+            proposal = result.proposals[0]
+            self.assertEqual(proposal.kind, "command")
+            self.assertEqual(proposal.status, "pending")
+            self.assertEqual(proposal.approval, "requested")
+            self.assertEqual(proposal.content["reason"], "verify proposal execution")
+            self.assertIn("approval_requested", [row["kind"] for row in rows])
+
+    def test_runtime_accepts_provider_command_proposal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, ProposalProvider())
+            thread = runtime.start_thread(tmp_path)
+            shell = ShellTool(AlwaysApprovePrompter())
+
+            turn_result = asyncio.run(runtime.run_user_turn_with_result(thread, "verify"))
+            command_result = asyncio.run(
+                runtime.run_proposed_command(thread, turn_result.proposals[0].id, shell)
+            )
+            rows = store.read_thread(thread.id)
+
+            self.assertTrue(command_result.approved)
+            self.assertEqual(command_result.exit_code, 0)
+            self.assertEqual(command_result.stdout.strip(), "proposal")
+            self.assertEqual(rows[-1]["payload"]["item"]["status"], "completed")
 
 
 if __name__ == "__main__":
