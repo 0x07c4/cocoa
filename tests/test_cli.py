@@ -228,6 +228,29 @@ class CliTests(unittest.TestCase):
         self.assertIn("session overrides persisted to .cocoa/config.env", logs)
         self.assertIn("provider: openai-compatible:gpt-4.1", logs)
 
+    def test_repl_history_and_show_last_use_projection(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        "hello projection",
+                        "/history",
+                        "/show last",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=Path(tmpdir)))
+        logs = output.getvalue()
+        self.assertIn("conversation", logs)
+        self.assertIn("2 items", logs)
+        self.assertIn("turn:", logs)
+        self.assertIn("user_message", logs)
+        self.assertIn("agent_message", logs)
+        self.assertIn("Provider is not configured yet.", logs)
+
 
     def test_persist_environment_overwrites_keys(self) -> None:
         with TemporaryDirectory() as tmpdir:

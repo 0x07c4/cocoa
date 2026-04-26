@@ -40,6 +40,8 @@ PYTHONPATH=src python -m cocoa repl
 - `/configure codex-http [model]`
 - `/set [--persist|-p] KEY VALUE`（支持 `KEY=VALUE`，带 `--persist` 同时写入 `.cocoa/config.env`）
 - `/persist`（保存当前会话内所有临时变量到 `.cocoa/config.env`）
+- `/history`（查看当前 thread 的 turn projection）
+- `/show <id|last>`（查看 turn 或 item projection）
 
 `/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
 

@@ -30,6 +30,21 @@ The important rule is that UI messages, command cards, approvals, and future
 file edits are projections of items. They should not become separate sources of
 truth.
 
+## Projection Boundary
+
+The append-only JSONL event stream is the source of truth. Read-side clients
+should not parse ad hoc event rows directly. They should consume a projection
+that reconstructs:
+
+- thread metadata
+- ordered turns
+- latest item state per item id
+- turn-scoped errors
+
+The first CLI projection commands are `/history` and `/show <id|last>`. Future
+TUI/editor surfaces should read the same projection layer instead of inventing a
+separate session state.
+
 ## Approval Boundary
 
 The MVP asks for human approval before every shell command. Later policy can

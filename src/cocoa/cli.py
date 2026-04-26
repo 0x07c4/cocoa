@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import shlex
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from typing import Mapping
 
 from . import __version__
+from .projection import ItemView, TurnView, load_thread_view
 from .providers import (
     ProviderConfigurationError,
     StubProvider,
@@ -206,6 +209,49 @@ def print_inspect(cwd: Path, path: str, max_entries: int) -> None:
         print(f"... capped at {max_entries} entries")
 
 
+def print_history(store: JsonlStore, thread_id: str) -> None:
+    view = load_thread_view(store, thread_id)
+    print(f"thread: {view.id}")
+    if view.title:
+        print(f"title: {view.title}")
+    if not view.turns:
+        print("no turns")
+        return
+    for turn in view.turns:
+        summary = turn.summary or _turn_preview(turn)
+        if summary:
+            summary = textwrap.shorten(summary.replace("\n", " "), width=80)
+        else:
+            summary = "-"
+        print(
+            f"{turn.id}\t{turn.status}\t{turn.intent}\t"
+            f"{len(turn.items)} items\t{summary}"
+        )
+
+
+def print_show(store: JsonlStore, thread_id: str, target: str) -> None:
+    view = load_thread_view(store, thread_id)
+    if target in {"last", "."}:
+        turn = view.last_turn
+        if turn is None:
+            print("no turns")
+            return
+        _print_turn_view(turn)
+        return
+
+    turn = view.find_turn(target)
+    if turn is not None:
+        _print_turn_view(turn)
+        return
+
+    item = view.find_item(target)
+    if item is not None:
+        _print_item_view(item)
+        return
+
+    print(f"not found: {target}")
+
+
 def _resolve_provider_status(env: Mapping[str, str] | None = None) -> str:
     # keep backwards compatibility for callers that pass no env
     source = dict(os.environ) if env is None else dict(env)
@@ -244,20 +290,76 @@ def _is_provider_configured(env: Mapping[str, str] | None = None) -> bool:
     return status != "stub" and not status.startswith("not configured (")
 
 
+def _turn_preview(turn: TurnView) -> str:
+    for item in reversed(turn.items):
+        if item.kind in {"agent_message", "user_message"}:
+            text = item.content.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    if turn.errors:
+        return turn.errors[-1].get("message", "")
+    return ""
+
+
+def _item_preview(item: ItemView) -> str:
+    if item.kind in {"agent_message", "user_message"}:
+        text = item.content.get("text")
+        if isinstance(text, str):
+            return textwrap.shorten(text.replace("\n", " "), width=90)
+    if item.kind == "command":
+        command = item.content.get("command")
+        exit_code = item.content.get("exit_code")
+        if isinstance(command, str):
+            suffix = f" exit={exit_code}" if exit_code is not None else ""
+            return textwrap.shorten(command + suffix, width=90)
+    rendered = json.dumps(item.content, ensure_ascii=False, sort_keys=True)
+    return textwrap.shorten(rendered, width=90)
+
+
+def _print_turn_view(turn: TurnView) -> None:
+    print(f"turn: {turn.id}")
+    print(f"status: {turn.status}")
+    print(f"intent: {turn.intent}")
+    if turn.summary:
+        print(f"summary: {turn.summary}")
+    if turn.errors:
+        print("errors:")
+        for error in turn.errors:
+            print(f"  {error.get('type', 'Error')}: {error.get('message', '')}")
+    if not turn.items:
+        print("items: none")
+        return
+    print("items:")
+    for item in turn.items:
+        print(
+            f"  {item.id}\t{item.kind}\t{item.status}\t"
+            f"approval={item.approval}\t{_item_preview(item)}"
+        )
+
+
+def _print_item_view(item: ItemView) -> None:
+    print(f"item: {item.id}")
+    print(f"turn: {item.turn_id}")
+    print(f"kind: {item.kind}")
+    print(f"status: {item.status}")
+    print(f"approval: {item.approval}")
+    print("content:")
+    print(json.dumps(item.content, ensure_ascii=False, indent=2, sort_keys=True))
+
+
 
 def _print_provider_config_help() -> None:
     print("provider is not configured.")
     print("Run one of these in current session (persisted by /configure):")
     print("")
     print("# OpenAI-compatible")
-    print("export COCOA_PROVIDER=openai")
-    print("export COCOA_OPENAI_API_KEY=\"<YOUR_KEY>\"")
-    print("export COCOA_OPENAI_MODEL=\"gpt-5\"")
+    print("/configure openai <YOUR_KEY> gpt-5 [base_url]")
     print("")
     print("# Codex HTTP (if logged in ChatGPT)")
-    print("export COCOA_PROVIDER=codex-http")
-    print("export COCOA_CODEX_BASE_URL=\"https://chatgpt.com/backend-api/codex\"")
-    print("python -m cocoa")
+    print("/configure codex-http [model]")
+    print("")
+    print("# Session override")
+    print("/set --persist KEY VALUE")
 
 
 async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
@@ -322,6 +424,8 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             print("/set [--persist|-p] KEY VALUE")
             print("                    set session variable (and optionally persist)")
             print("/persist            persist current session overrides to .cocoa/config.env")
+            print("/history            show turns in current thread")
+            print("/show <id|last>     show a turn or item projection")
             print("/inspect [path]     list workspace files")
             print("/run <command>      run shell command after approval")
             print("/exit               quit")
@@ -420,6 +524,17 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             print(f"thread: {thread.id}")
             print(f"cwd: {cwd}")
             print(f"log: {store.thread_path(thread.id)}")
+            continue
+        if line == "/history":
+            print_history(store, thread.id)
+            continue
+        if line == "/show" or line.startswith("/show "):
+            _, _, target = line.partition(" ")
+            target = target.strip()
+            if not target:
+                print("usage: /show <turn_id|item_id|last>")
+                continue
+            print_show(store, thread.id, target)
             continue
         if line == "/provider":
             print(f"provider: {_resolve_provider_status_for_env(env)}")
