@@ -4,13 +4,15 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 import textwrap
+import unicodedata
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 from . import __version__
 from .projection import ItemView, TurnView, load_thread_view
@@ -44,6 +46,54 @@ _REPL_COMMANDS = (
 _CONFIGURE_MODES = ("clear", "codex-http", "openai")
 _SET_OPTIONS = ("--persist", "-p")
 
+_REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
+    "/configure": "configure provider",
+    "/exit": "quit cocoa",
+    "/help": "show commands",
+    "/history": "show thread turns",
+    "/inspect": "list workspace files",
+    "/model": "show model",
+    "/persist": "save session config",
+    "/provider": "show provider",
+    "/quit": "quit cocoa",
+    "/run": "run shell command",
+    "/set": "set session variable",
+    "/show": "show turn or item",
+    "/status": "show session status",
+}
+
+_CONFIGURE_MODE_DESCRIPTIONS: Mapping[str, str] = {
+    "clear": "clear workspace provider override",
+    "codex-http": "use local Codex auth over HTTP",
+    "openai": "use OpenAI-compatible API",
+}
+
+_SET_OPTION_DESCRIPTIONS: Mapping[str, str] = {
+    "--persist": "also write to .cocoa/config.env",
+    "-p": "also write to .cocoa/config.env",
+}
+
+_COMMANDS_EXPECTING_ARGUMENTS = {
+    "/configure",
+    "/inspect",
+    "/run",
+    "/set",
+    "/show",
+}
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_KNOWN_ESCAPE_KEYS = {
+    "\x1b[A",
+    "\x1b[B",
+    "\x1b[C",
+    "\x1b[D",
+    "\x1b[H",
+    "\x1b[F",
+    "\x1b[1~",
+    "\x1b[3~",
+    "\x1b[4~",
+}
+
 
 class ReplInput:
     def __init__(self, cwd: Path, store: JsonlStore, thread_id: str) -> None:
@@ -56,9 +106,16 @@ class ReplInput:
             if sys.stdin.isatty()
             else None
         )
+        self._native_composer = (
+            _create_native_composer(cwd, store, thread_id)
+            if sys.stdin.isatty() and self._session is None
+            else None
+        )
         self._restore_readline = (
             _install_repl_completion(cwd, store, thread_id)
-            if sys.stdin.isatty() and self._session is None
+            if sys.stdin.isatty()
+            and self._session is None
+            and self._native_composer is None
             else (lambda: None)
         )
 
@@ -69,6 +126,8 @@ class ReplInput:
                 bottom_toolbar=_prompt_toolkit_toolbar(provider_status),
                 wrap_lines=True,
             )
+        if self._native_composer is not None:
+            return self._native_composer.read(provider_status)
         return input(_format_repl_prompt(provider_status, self.thread_id, color=self.color))
 
     def close(self) -> None:
@@ -332,6 +391,118 @@ def _completion_candidates(
     return []
 
 
+def _completion_text(line: str) -> str:
+    if line.endswith(" "):
+        return ""
+    return line.rsplit(" ", 1)[-1]
+
+
+def _apply_completion_candidate(line: str, candidate: str) -> str:
+    if line.endswith(" "):
+        completed = f"{line}{candidate}"
+    else:
+        prefix, separator, _ = line.rpartition(" ")
+        completed = f"{prefix}{separator}{candidate}" if separator else candidate
+    if completed in _COMMANDS_EXPECTING_ARGUMENTS:
+        return f"{completed} "
+    return completed
+
+
+def _apply_completion_candidate_at_cursor(
+    line: str,
+    cursor: int,
+    candidate: str,
+) -> tuple[str, int]:
+    before_cursor = line[:cursor]
+    token_start = before_cursor.rfind(" ") + 1
+    next_space_index = line.find(" ", cursor)
+    token_end = len(line) if next_space_index < 0 else next_space_index
+    completed_before_cursor = line[:token_start] + candidate
+    if completed_before_cursor in _COMMANDS_EXPECTING_ARGUMENTS:
+        completed_before_cursor = f"{completed_before_cursor} "
+    after_token = line[token_end:]
+    if completed_before_cursor.endswith(" ") and after_token.startswith(" "):
+        after_token = after_token[1:]
+    return completed_before_cursor + after_token, len(completed_before_cursor)
+
+
+def _suggestion_items(
+    line: str,
+    *,
+    cwd: Path,
+    store: JsonlStore,
+    thread_id: str,
+    max_items: int = 16,
+) -> list[tuple[str, str]]:
+    if not line.startswith("/"):
+        return []
+    text = _completion_text(line)
+    candidates = _completion_candidates(
+        line,
+        text,
+        cwd=cwd,
+        store=store,
+        thread_id=thread_id,
+    )
+    return [
+        (candidate, _completion_description(line, candidate))
+        for candidate in candidates[:max_items]
+    ]
+
+
+def _completion_description(line: str, candidate: str) -> str:
+    command, has_space, _ = line.partition(" ")
+    if not has_space:
+        return _REPL_COMMAND_DESCRIPTIONS.get(candidate, "")
+    if command == "/configure":
+        return _CONFIGURE_MODE_DESCRIPTIONS.get(candidate, "")
+    if command == "/set":
+        return _SET_OPTION_DESCRIPTIONS.get(candidate, "")
+    if command == "/show":
+        if candidate in {"last", "."}:
+            return "latest turn"
+        if candidate.startswith("turn_"):
+            return "turn projection"
+        if candidate.startswith("item_"):
+            return "item projection"
+        return "projection target"
+    if command == "/inspect":
+        return "workspace path"
+    return ""
+
+
+def _format_suggestion_lines(
+    line: str,
+    *,
+    cwd: Path,
+    store: JsonlStore,
+    thread_id: str,
+    color: bool,
+    selected_index: int = 0,
+) -> list[str]:
+    items = _suggestion_items(
+        line,
+        cwd=cwd,
+        store=store,
+        thread_id=thread_id,
+    )
+    if not items:
+        return []
+    width = max(len(value) for value, _ in items)
+    lines: list[str] = []
+    for index, (value, description) in enumerate(items):
+        selected = index == selected_index
+        marker = ">" if selected else " "
+        pad = " " * (width - len(value) + 2)
+        value_style = "1;36" if selected else "36"
+        description_style = "37" if selected else "2"
+        display_marker = _ansi(marker, "1;36", color) if selected else marker
+        display_value = _ansi(value, value_style, color)
+        display_description = _ansi(description, description_style, color)
+        lines.append(f"{display_marker} {display_value}{pad}{display_description}".rstrip())
+    return lines
+
+
 def _show_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
     candidates = ["last", "."]
     try:
@@ -376,11 +547,329 @@ def _workspace_path_completion_candidates(cwd: Path, text: str) -> list[str]:
     return candidates
 
 
+def _create_native_composer(
+    cwd: Path,
+    store: JsonlStore,
+    thread_id: str,
+) -> _NativeComposer | None:
+    try:
+        import termios  # noqa: F401
+        import tty  # noqa: F401
+    except ImportError:
+        return None
+    return _NativeComposer(cwd, store, thread_id)
+
+
+class _NativeComposer:
+    def __init__(self, cwd: Path, store: JsonlStore, thread_id: str) -> None:
+        self.cwd = cwd
+        self.store = store
+        self.thread_id = thread_id
+        self.history_path = cwd / ".cocoa" / "input_history_plain"
+        self.color = _should_use_color()
+
+    def read(self, provider_status: str) -> str:
+        try:
+            import termios
+            import tty
+        except ImportError:
+            return input(_format_repl_prompt(provider_status, self.thread_id, color=self.color))
+
+        fd = sys.stdin.fileno()
+        original_attrs = termios.tcgetattr(fd)
+        history = self._load_history()
+        history_index = len(history)
+        buffer = ""
+        cursor = 0
+        rendered_lines = 0
+        selected_index = 0
+        previous_suggestions: tuple[str, ...] = ()
+        pending_escape = ""
+
+        try:
+            tty.setcbreak(fd)
+            rendered_lines = self._render(
+                provider_status,
+                buffer,
+                rendered_lines,
+                cursor=cursor,
+                selected_index=selected_index,
+            )
+            while True:
+                suggestions = self._suggestion_values(buffer, cursor)
+                if suggestions != previous_suggestions:
+                    selected_index = 0
+                    previous_suggestions = suggestions
+                if selected_index >= len(suggestions):
+                    selected_index = 0
+                key = _read_terminal_key()
+                if pending_escape:
+                    key = f"{pending_escape}{key}"
+                    pending_escape = ""
+                if key in {"\x1b", "\x1b["}:
+                    pending_escape = key
+                    continue
+                if key.startswith("\x1b") and key not in _KNOWN_ESCAPE_KEYS:
+                    key = "\x1b"
+                if key in {"\x1b[A", "\x1b[B"}:
+                    suggestions = self._suggestion_values(buffer, cursor)
+                    if suggestions != previous_suggestions:
+                        selected_index = 0
+                        previous_suggestions = suggestions
+                    if selected_index >= len(suggestions):
+                        selected_index = 0
+                if key in {"\r", "\n"}:
+                    if suggestions and _completion_text(buffer[:cursor]) != suggestions[selected_index]:
+                        buffer, cursor = _apply_completion_candidate_at_cursor(
+                            buffer,
+                            cursor,
+                            suggestions[selected_index],
+                        )
+                        rendered_lines = self._render(
+                            provider_status,
+                            buffer,
+                            rendered_lines,
+                            cursor=cursor,
+                            selected_index=selected_index,
+                        )
+                        continue
+                    sys.stdout.write("\r\n")
+                    sys.stdout.flush()
+                    self._append_history(buffer)
+                    return buffer
+                if key == "\x03":
+                    raise KeyboardInterrupt
+                if key == "\x04":
+                    if buffer:
+                        continue
+                    raise EOFError
+                if key in {"\x7f", "\b"}:
+                    if cursor > 0:
+                        buffer = buffer[: cursor - 1] + buffer[cursor:]
+                        cursor -= 1
+                    history_index = len(history)
+                elif key == "\x1b[3~":
+                    if cursor < len(buffer):
+                        buffer = buffer[:cursor] + buffer[cursor + 1:]
+                    history_index = len(history)
+                elif key in {"\x1b[D"}:
+                    cursor = max(0, cursor - 1)
+                elif key in {"\x1b[C"}:
+                    cursor = min(len(buffer), cursor + 1)
+                elif key in {"\x01", "\x1b[H", "\x1b[1~"}:
+                    cursor = 0
+                elif key in {"\x05", "\x1b[F", "\x1b[4~"}:
+                    cursor = len(buffer)
+                elif key == "\x15":
+                    buffer = ""
+                    cursor = 0
+                    history_index = len(history)
+                elif key == "\x17":
+                    buffer, cursor = _delete_previous_word_at_cursor(buffer, cursor)
+                    history_index = len(history)
+                elif key == "\x0b":
+                    buffer = buffer[:cursor]
+                    history_index = len(history)
+                elif key == "\t":
+                    if suggestions:
+                        buffer, cursor = _apply_completion_candidate_at_cursor(
+                            buffer,
+                            cursor,
+                            suggestions[selected_index],
+                        )
+                    history_index = len(history)
+                elif key == "\x1b[A":
+                    if suggestions:
+                        selected_index = (selected_index - 1) % len(suggestions)
+                    elif history and history_index > 0:
+                        history_index -= 1
+                        buffer = history[history_index]
+                        cursor = len(buffer)
+                elif key == "\x1b[B":
+                    if suggestions:
+                        selected_index = (selected_index + 1) % len(suggestions)
+                    elif history_index < len(history) - 1:
+                        history_index += 1
+                        buffer = history[history_index]
+                        cursor = len(buffer)
+                    elif history_index < len(history):
+                        history_index = len(history)
+                        buffer = ""
+                        cursor = 0
+                elif len(key) == 1 and key.isprintable():
+                    buffer = buffer[:cursor] + key + buffer[cursor:]
+                    cursor += 1
+                    history_index = len(history)
+                suggestions = self._suggestion_values(buffer, cursor)
+                if suggestions != previous_suggestions:
+                    selected_index = 0
+                    previous_suggestions = suggestions
+                if selected_index >= len(suggestions):
+                    selected_index = 0
+                rendered_lines = self._render(
+                    provider_status,
+                    buffer,
+                    rendered_lines,
+                    cursor=cursor,
+                    selected_index=selected_index,
+                )
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, original_attrs)
+
+    def _render(
+        self,
+        provider_status: str,
+        line: str,
+        previous_lines: int,
+        *,
+        cursor: int,
+        selected_index: int,
+    ) -> int:
+        _clear_rendered_lines(previous_lines)
+        lines = _format_repl_prompt(
+            provider_status,
+            self.thread_id,
+            color=self.color,
+        ).splitlines()
+        input_prefix = lines[-1]
+        lines[-1] = f"{input_prefix}{line}"
+        lines.extend(
+            _format_suggestion_lines(
+                line[:cursor],
+                cwd=self.cwd,
+                store=self.store,
+                thread_id=self.thread_id,
+                color=self.color,
+                selected_index=selected_index,
+            )
+        )
+        sys.stdout.write("\r\n".join(lines))
+        _move_cursor_to_input(
+            suggestion_line_count=max(0, len(lines) - 2),
+            input_prefix=input_prefix,
+            text_before_cursor=line[:cursor],
+        )
+        sys.stdout.flush()
+        return len(lines)
+
+    def _suggestion_values(
+        self,
+        line: str,
+        cursor: int,
+    ) -> tuple[str, ...]:
+        query = line[:cursor]
+        return tuple(
+            value
+            for value, _ in _suggestion_items(
+                query,
+                cwd=self.cwd,
+                store=self.store,
+                thread_id=self.thread_id,
+            )
+        )
+
+    def _load_history(self) -> list[str]:
+        try:
+            raw = self.history_path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        return [line for line in raw.splitlines() if line.strip()]
+
+    def _append_history(self, line: str) -> None:
+        text = line.strip()
+        if not text:
+            return
+        history = self._load_history()
+        if history and history[-1] == text:
+            return
+        try:
+            self.history_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.history_path.open("a", encoding="utf-8") as handle:
+                handle.write(text + "\n")
+        except OSError:
+            return
+
+
+def _read_terminal_key() -> str:
+    key = sys.stdin.read(1)
+    if key != "\x1b":
+        return key
+    try:
+        import select
+    except ImportError:
+        return key
+    parts = [key]
+    while len(parts) < 6 and select.select([sys.stdin], [], [], 0.05)[0]:
+        parts.append(sys.stdin.read(1))
+    return "".join(parts)
+
+
+def _clear_rendered_lines(line_count: int) -> None:
+    if line_count <= 0:
+        return
+    sys.stdout.write("\r")
+    if line_count > 1:
+        sys.stdout.write("\033[F")
+    for index in range(line_count):
+        sys.stdout.write("\033[K")
+        if index < line_count - 1:
+            sys.stdout.write("\033[E")
+    if line_count > 1:
+        sys.stdout.write(f"\033[{line_count - 1}F")
+    sys.stdout.write("\r")
+
+
+def _delete_previous_word(line: str) -> str:
+    stripped = line.rstrip()
+    if not stripped:
+        return ""
+    index = stripped.rfind(" ")
+    if index < 0:
+        return ""
+    return stripped[: index + 1]
+
+
+def _delete_previous_word_at_cursor(line: str, cursor: int) -> tuple[str, int]:
+    before_cursor = line[:cursor].rstrip()
+    if not before_cursor:
+        return line[cursor:], 0
+    index = before_cursor.rfind(" ")
+    new_cursor = 0 if index < 0 else index + 1
+    after_cursor = line[cursor:]
+    if new_cursor > 0 and line[:new_cursor].endswith(" ") and after_cursor.startswith(" "):
+        after_cursor = after_cursor[1:]
+    return line[:new_cursor] + after_cursor, new_cursor
+
+
+def _move_cursor_to_input(
+    *,
+    suggestion_line_count: int,
+    input_prefix: str,
+    text_before_cursor: str,
+) -> None:
+    if suggestion_line_count > 0:
+        sys.stdout.write(f"\033[{suggestion_line_count}F")
+    sys.stdout.write("\r")
+    column = _display_width(input_prefix) + _display_width(text_before_cursor)
+    if column > 0:
+        sys.stdout.write(f"\033[{column}C")
+
+
+def _display_width(text: str) -> int:
+    plain = _ANSI_RE.sub("", text)
+    width = 0
+    for character in plain:
+        if unicodedata.combining(character):
+            continue
+        width += 2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
+    return width
+
+
 def _create_prompt_toolkit_session(
     cwd: Path,
     store: JsonlStore,
     thread_id: str,
-) -> object | None:
+) -> Any | None:
     try:
         from prompt_toolkit import PromptSession  # type: ignore[import-not-found]
         from prompt_toolkit.completion import Completer, Completion  # type: ignore[import-not-found]

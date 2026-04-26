@@ -46,8 +46,11 @@ PYTHONPATH=src python -m cocoa repl
 `/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
 REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa-agent[ui]`
 后会自动使用 `prompt_toolkit` 的 styled session；否则降级为 stdlib 输入框。
-在支持 GNU readline 的终端里，fallback 输入框仍支持 Tab 补全 slash commands、`/show`
-的 turn/item id，以及 `/inspect` 的工作区路径。
+在真实 TTY 里，fallback 输入框也会在输入 `/` 时直接显示 slash command 候选，
+不需要先按 Tab；上下键可移动选中项，Tab/Enter 可接受候选。
+输入行支持左右移动、Home/End、Delete、Ctrl+A/E、Ctrl+K、Ctrl+W 这些基础编辑键。
+`/show` 的 turn/item id 和 `/inspect` 的工作区路径同样会出现在候选里。非 TTY
+或不支持 raw terminal 的环境会回退到普通 `input()`。
 
 `/provider` 会显示当前 provider，`/model` 会显示模型（未就绪时显示 `unknown`）。
 

@@ -11,9 +11,14 @@ from unittest import mock
 
 from cocoa.cli import (
     run_repl,
+    _apply_completion_candidate,
+    _apply_completion_candidate_at_cursor,
     _completion_candidates,
+    _delete_previous_word_at_cursor,
     _effective_environment,
     _format_repl_prompt,
+    _format_suggestion_lines,
+    _suggestion_items,
     _persist_environment,
     _parse_config_lines,
     _is_provider_configured,
@@ -311,6 +316,89 @@ class CliTests(unittest.TestCase):
             )
 
         self.assertIn("src/", candidates)
+
+    def test_repl_suggestions_show_commands_without_tab(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            suggestions = _suggestion_items(
+                "/",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn(("/help", "show commands"), suggestions)
+        self.assertIn(("/history", "show thread turns"), suggestions)
+        self.assertIn(("/status", "show session status"), suggestions)
+
+    def test_repl_suggestions_filter_commands_while_typing(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            suggestions = _suggestion_items(
+                "/hi",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertEqual(suggestions, [("/history", "show thread turns")])
+
+    def test_apply_completion_adds_space_for_argument_commands(self) -> None:
+        self.assertEqual(_apply_completion_candidate("/", "/show"), "/show ")
+        self.assertEqual(_apply_completion_candidate("/show ", "last"), "/show last")
+
+    def test_apply_completion_preserves_text_after_cursor(self) -> None:
+        line, cursor = _apply_completion_candidate_at_cursor(
+            "/sh later",
+            len("/sh"),
+            "/show",
+        )
+
+        self.assertEqual(line, "/show later")
+        self.assertEqual(cursor, len("/show "))
+
+    def test_apply_completion_replaces_current_token_suffix(self) -> None:
+        line, cursor = _apply_completion_candidate_at_cursor(
+            "/exit",
+            len("/exi"),
+            "/exit",
+        )
+
+        self.assertEqual(line, "/exit")
+        self.assertEqual(cursor, len("/exit"))
+
+    def test_delete_previous_word_at_cursor_preserves_suffix(self) -> None:
+        line, cursor = _delete_previous_word_at_cursor("hello cocoa world", len("hello cocoa"))
+
+        self.assertEqual(line, "hello world")
+        self.assertEqual(cursor, len("hello "))
+
+    def test_repl_suggestion_lines_mark_selected_item(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            lines = _format_suggestion_lines(
+                "/",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+                color=False,
+                selected_index=1,
+            )
+
+        self.assertTrue(lines[0].startswith("  /configure"))
+        self.assertTrue(lines[1].startswith("> /exit"))
 
     def test_repl_prompt_is_boxed_and_includes_status(self) -> None:
         prompt = _format_repl_prompt(
