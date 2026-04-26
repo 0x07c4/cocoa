@@ -21,7 +21,7 @@ from .models import (
     now_ms,
 )
 from .providers import ProviderAdapter, ProviderRequest
-from .proposals import CommandProposal, FileWriteProposal, parse_proposals
+from .proposals import CommandProposal, FileEditProposal, FileWriteProposal, parse_proposals
 from .store import JsonlStore
 from .tools import CommandResult, ShellTool
 from .workspace import WorkspaceScope
@@ -228,6 +228,10 @@ class AgentRuntime:
         proposal_items_list.extend(
             self._file_write_proposal_item(thread, turn, proposal)
             for proposal in parsed.file_writes
+        )
+        proposal_items_list.extend(
+            self._file_edit_proposal_item(thread, turn, proposal)
+            for proposal in parsed.file_edits
         )
         proposal_items = tuple(proposal_items_list)
         for item in proposal_items:
@@ -469,6 +473,11 @@ class AgentRuntime:
         item_id: str,
     ) -> ItemRecord:
         pending_item = self._find_pending_file_write(thread, item_id)
+        operation = pending_item.content.get("operation", "write")
+        if operation == "replace":
+            return self._apply_proposed_file_edit(thread, pending_item)
+        if operation != "write":
+            raise ValueError(f"unsupported file write operation: {operation}")
         path = pending_item.content.get("path")
         content = pending_item.content.get("content")
         if not isinstance(path, str) or not isinstance(content, str):
@@ -491,6 +500,67 @@ class AgentRuntime:
                 "previous_exists": previous_exists,
                 "previous_size": previous_size,
                 "bytes_written": len(content.encode("utf-8")),
+            },
+            approval=ApprovalState.ACCEPTED,
+            created_at_ms=pending_item.created_at_ms,
+            completed_at_ms=now_ms(),
+        )
+        self.store.append_many(
+            [
+                event(
+                    EventKind.APPROVAL_RESOLVED,
+                    thread_id=thread.id,
+                    turn_id=pending_item.turn_id,
+                    item_id=final_item.id,
+                    payload={"approved": True},
+                ),
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread.id,
+                    turn_id=pending_item.turn_id,
+                    item_id=final_item.id,
+                    payload={"item": final_item},
+                ),
+            ]
+        )
+        return final_item
+
+    def _apply_proposed_file_edit(
+        self,
+        thread: ThreadRecord,
+        pending_item: ItemRecord,
+    ) -> ItemRecord:
+        path = pending_item.content.get("path")
+        old = pending_item.content.get("old")
+        new = pending_item.content.get("new")
+        replace_all = pending_item.content.get("replace_all") is True
+        if not isinstance(path, str) or not isinstance(old, str) or not isinstance(new, str):
+            raise ValueError(f"invalid file edit proposal: {pending_item.id}")
+        target, relative = self._resolve_workspace_write_path(thread, path)
+        if not target.exists():
+            raise ValueError(f"path does not exist: {relative}")
+        previous = target.read_text(encoding="utf-8")
+        updated = self._replace_exact_text(
+            previous,
+            old,
+            new,
+            replace_all=replace_all,
+            item_id=pending_item.id,
+        )
+        previous_size = target.stat().st_size
+        target.write_text(updated, encoding="utf-8")
+        final_item = ItemRecord(
+            id=pending_item.id,
+            thread_id=thread.id,
+            turn_id=pending_item.turn_id,
+            kind=ItemKind.FILE_WRITE,
+            status=ItemStatus.COMPLETED,
+            content={
+                **pending_item.content,
+                "path": relative,
+                "previous_exists": True,
+                "previous_size": previous_size,
+                "bytes_written": len(updated.encode("utf-8")),
             },
             approval=ApprovalState.ACCEPTED,
             created_at_ms=pending_item.created_at_ms,
@@ -583,6 +653,7 @@ class AgentRuntime:
         proposal: FileWriteProposal,
     ) -> ItemRecord:
         content: dict[str, Any] = {
+            "operation": "write",
             "path": proposal.path,
             "content": proposal.content,
             "source": "provider_proposal",
@@ -593,6 +664,46 @@ class AgentRuntime:
             target, relative = self._resolve_workspace_write_path(thread, proposal.path)
             content["path"] = relative
             content["diff"] = self._file_write_diff(target, relative, proposal.content)
+        except ValueError as exc:
+            content["scope_error"] = str(exc)
+        except (OSError, UnicodeError) as exc:
+            content["scope_error"] = str(exc)
+        return ItemRecord(
+            id=new_id("item"),
+            thread_id=thread.id,
+            turn_id=turn.id,
+            kind=ItemKind.FILE_WRITE,
+            status=ItemStatus.PENDING,
+            content=content,
+            approval=ApprovalState.REQUESTED,
+        )
+
+    def _file_edit_proposal_item(
+        self,
+        thread: ThreadRecord,
+        turn: TurnRecord,
+        proposal: FileEditProposal,
+    ) -> ItemRecord:
+        content: dict[str, Any] = {
+            "operation": "replace",
+            "path": proposal.path,
+            "old": proposal.old,
+            "new": proposal.new,
+            "replace_all": proposal.replace_all,
+            "source": "provider_proposal",
+        }
+        if proposal.reason:
+            content["reason"] = proposal.reason
+        try:
+            target, relative = self._resolve_workspace_write_path(thread, proposal.path)
+            content["path"] = relative
+            content["diff"] = self._file_edit_diff(
+                target,
+                relative,
+                proposal.old,
+                proposal.new,
+                replace_all=proposal.replace_all,
+            )
         except ValueError as exc:
             content["scope_error"] = str(exc)
         except (OSError, UnicodeError) as exc:
@@ -908,6 +1019,55 @@ class AgentRuntime:
                 tofile=f"b/{relative}",
             )
         )
+
+    def _file_edit_diff(
+        self,
+        target: Path,
+        relative: str,
+        old: str,
+        new: str,
+        *,
+        replace_all: bool,
+    ) -> str:
+        if not target.exists():
+            raise ValueError(f"path does not exist: {relative}")
+        current = target.read_text(encoding="utf-8")
+        updated = self._replace_exact_text(
+            current,
+            old,
+            new,
+            replace_all=replace_all,
+            item_id=relative,
+        )
+        return "".join(
+            unified_diff(
+                current.splitlines(keepends=True),
+                updated.splitlines(keepends=True),
+                fromfile=f"a/{relative}",
+                tofile=f"b/{relative}",
+            )
+        )
+
+    def _replace_exact_text(
+        self,
+        current: str,
+        old: str,
+        new: str,
+        *,
+        replace_all: bool,
+        item_id: str,
+    ) -> str:
+        if not old:
+            raise ValueError(f"file edit proposal has empty old text: {item_id}")
+        count = current.count(old)
+        if count == 0:
+            raise ValueError(f"old text not found for file edit proposal: {item_id}")
+        if count > 1 and not replace_all:
+            raise ValueError(
+                f"old text matched {count} times; set replace_all=true or make it unique: {item_id}"
+            )
+        limit = -1 if replace_all else 1
+        return current.replace(old, new, limit)
 
     def _build_thread_context(
         self,

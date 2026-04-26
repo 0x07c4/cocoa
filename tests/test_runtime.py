@@ -67,6 +67,29 @@ class FileProposalProvider:
         )
 
 
+class FileEditProvider:
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        proposal = {
+            "edits": [
+                {
+                    "path": "hello.txt",
+                    "old": "hello from cocoa\n",
+                    "new": "hello from edited cocoa\n",
+                    "reason": "update greeting",
+                }
+            ]
+        }
+        return ProviderResponse(
+            message=(
+                "I can edit a file.\n\n"
+                "```cocoa-proposal\n"
+                f"{json.dumps(proposal)}\n"
+                "```"
+            ),
+            summary="file edit proposal",
+        )
+
+
 class RuntimeTests(unittest.TestCase):
     def test_runtime_records_user_turn(self) -> None:
         from tempfile import TemporaryDirectory
@@ -373,6 +396,85 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(item.status, "completed")
             self.assertEqual(item.approval, "accepted")
             self.assertEqual(rows[-1]["payload"]["item"]["status"], "completed")
+
+    def test_runtime_records_provider_file_edit_proposals(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "hello.txt").write_text("hello from cocoa\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, FileEditProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(runtime.run_user_turn_with_result(thread, "edit file"))
+
+            self.assertEqual(result.message, "I can edit a file.")
+            self.assertEqual(len(result.proposals), 1)
+            proposal = result.proposals[0]
+            self.assertEqual(proposal.kind, "file_write")
+            self.assertEqual(proposal.status, "pending")
+            self.assertEqual(proposal.approval, "requested")
+            self.assertEqual(proposal.content["operation"], "replace")
+            self.assertEqual(proposal.content["path"], "hello.txt")
+            self.assertEqual(proposal.content["reason"], "update greeting")
+            self.assertIn("-hello from cocoa", proposal.content["diff"])
+            self.assertIn("+hello from edited cocoa", proposal.content["diff"])
+
+    def test_runtime_applies_provider_file_edit_proposal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "hello.txt").write_text("hello from cocoa\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, FileEditProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            turn_result = asyncio.run(runtime.run_user_turn_with_result(thread, "edit file"))
+            item = runtime.apply_proposed_file_write(thread, turn_result.proposals[0].id)
+
+            self.assertEqual(
+                (tmp_path / "hello.txt").read_text(encoding="utf-8"),
+                "hello from edited cocoa\n",
+            )
+            self.assertEqual(item.status, "completed")
+            self.assertEqual(item.approval, "accepted")
+            self.assertEqual(item.content["operation"], "replace")
+
+    def test_runtime_rejects_ambiguous_file_edit_proposal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        class AmbiguousEditProvider:
+            async def complete(self, request: ProviderRequest) -> ProviderResponse:
+                proposal = {
+                    "edits": [
+                        {
+                            "path": "hello.txt",
+                            "old": "hello",
+                            "new": "hi",
+                            "reason": "ambiguous",
+                        }
+                    ]
+                }
+                return ProviderResponse(
+                    message="bad edit\n```cocoa-proposal\n"
+                    f"{json.dumps(proposal)}\n```",
+                    summary="bad edit",
+                )
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "hello.txt").write_text("hello\nhello\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, AmbiguousEditProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            turn_result = asyncio.run(runtime.run_user_turn_with_result(thread, "edit file"))
+
+            self.assertIn("matched 2 times", turn_result.proposals[0].content["scope_error"])
+            with self.assertRaisesRegex(ValueError, "matched 2 times"):
+                runtime.apply_proposed_file_write(thread, turn_result.proposals[0].id)
 
     def test_runtime_rejects_pending_file_write_proposal(self) -> None:
         from tempfile import TemporaryDirectory

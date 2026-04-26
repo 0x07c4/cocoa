@@ -1310,9 +1310,11 @@ def _print_pending_proposals(items: list[ItemView]) -> None:
             continue
         if item.kind == "file_write":
             path = item.content.get("path")
+            operation = item.content.get("operation", "write")
+            action = "edit" if operation == "replace" else "write"
             reason = item.content.get("reason")
             scope_error = item.content.get("scope_error")
-            print(f"  {item.id}: write {path}")
+            print(f"  {item.id}: {action} {path}")
             if isinstance(reason, str) and reason:
                 print(f"    reason: {reason}")
             if isinstance(scope_error, str) and scope_error:
@@ -1367,9 +1369,11 @@ def _print_proposals(proposals: tuple[ItemRecord, ...]) -> None:
             continue
         if item.kind == ItemKind.FILE_WRITE:
             path = item.content.get("path")
+            operation = item.content.get("operation", "write")
+            action = "edit" if operation == "replace" else "write"
             reason = item.content.get("reason")
             scope_error = item.content.get("scope_error")
-            print(f"  {item.id}: write {path}")
+            print(f"  {item.id}: {action} {path}")
             if isinstance(reason, str) and reason:
                 print(f"    reason: {reason}")
             if isinstance(scope_error, str) and scope_error:

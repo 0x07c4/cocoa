@@ -80,6 +80,10 @@ pending items with `approval=requested`:
 - `FILE_WRITE` proposals include a unified diff preview and require
   `/apply <item_id>`. Writes are constrained by `WorkspaceScope`, so ignored
   paths and paths outside the workspace are rejected.
+- existing-file edits are represented as `FILE_WRITE` proposals with
+  `operation=replace`, using exact `old` / `new` text replacement. The `old`
+  text must match exactly once unless `replace_all=true`, which avoids fuzzy or
+  hidden model-side patch application.
 - pending proposals can be redisplayed with `/pending`, file diffs can be
   redisplayed with `/diff <item_id>`, and either command or file proposals can be
   explicitly closed with `/reject <item_id>`.

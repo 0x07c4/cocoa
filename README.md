@@ -69,17 +69,26 @@ REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa
 
 `/provider` 会显示当前 provider，`/model` 会显示模型（未就绪时显示 `unknown`）。
 
-Provider 可以在普通文本后附一个 `cocoa-proposal` JSON block 来提出命令或文件写入建议。
+Provider 可以在普通文本后附一个 `cocoa-proposal` JSON block 来提出命令、精确文件编辑或文件写入建议。
 `cocoa` 会把建议记录为 pending item。`/pending` 可以随时重新列出未处理建议，
 `/diff <item_id>` 可以重新查看文件改动，`/reject <item_id>` 会把建议明确记录为
 rejected。命令只在用户执行 `/accept <item_id>` 并通过确认后才运行；文件写入会先
-展示 unified diff，只在用户执行 `/apply <item_id>` 后写入：
+展示 unified diff，只在用户执行 `/apply <item_id>` 后写入。对已有文件应优先使用
+`edits` 的 `old` / `new` 精确替换；`old` 默认必须唯一匹配，否则 cocoa 会拒绝应用：
 
 ````markdown
 ```cocoa-proposal
 {
   "commands": [
     {"command": "python -m unittest discover -s tests -q", "reason": "verify changes"}
+  ],
+  "edits": [
+    {
+      "path": "README.md",
+      "old": "old exact text\n",
+      "new": "new replacement text\n",
+      "reason": "update existing documentation"
+    }
   ],
   "write_files": [
     {"path": "hello.txt", "content": "hello\n", "reason": "create demo file"}
@@ -181,7 +190,8 @@ This is an MVP skeleton. It intentionally starts without a model dependency.
 The bundled provider is a stub. OpenAI-compatible, Codex HTTP, and Codex CLI
 adapters are available through environment/config variables. The current coding
 loop supports workspace context, explicit `@path` file reads, structured command
-proposals, and file write proposals while keeping the runtime protocol stable.
+proposals, exact file edit proposals, and file write proposals while keeping the
+runtime protocol stable.
 
 The current implementation records a `Thread`, starts `Turn`s, creates `Item`s,
 and stores lifecycle `Event`s. Events are the append-only trail, not a child
@@ -200,9 +210,9 @@ model is targeted to become:
 6. recorded event trail
 
 The MVP implements the recorded event trail, shell approval gate, command
-proposal approval, workspace context injection, explicit file reads, and file
-write preview/apply. Richer patch formats, streaming deltas, and rollback are
-next-layer work.
+proposal approval, workspace context injection, explicit file reads, exact file
+edit preview/apply, and file write preview/apply. Richer patch formats,
+streaming deltas, and rollback are next-layer work.
 
 The CLI is only one projection of the runtime. Future TUI/editor clients should
 read the same event stream rather than inventing their own state model.
