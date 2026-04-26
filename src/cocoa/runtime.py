@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 from dataclasses import dataclass
+from difflib import unified_diff
+from pathlib import Path
 from typing import Any
 
 from .models import (
@@ -19,9 +20,10 @@ from .models import (
     now_ms,
 )
 from .providers import ProviderAdapter, ProviderRequest
-from .proposals import CommandProposal, parse_command_proposals
+from .proposals import CommandProposal, FileWriteProposal, parse_proposals
 from .store import JsonlStore
 from .tools import CommandResult, ShellTool
+from .workspace import WorkspaceScope
 
 
 @dataclass(frozen=True)
@@ -165,7 +167,8 @@ class AgentRuntime:
             )
             raise
 
-        message, command_proposals = parse_command_proposals(response.message)
+        parsed = parse_proposals(response.message)
+        message = parsed.message
         if not message:
             message = response.message.strip()
 
@@ -187,10 +190,16 @@ class AgentRuntime:
                 payload={"item": agent_item},
             )
         ]
-        proposal_items = tuple(
+        proposal_items_list: list[ItemRecord] = []
+        proposal_items_list.extend(
             self._command_proposal_item(thread, turn, proposal)
-            for proposal in command_proposals
+            for proposal in parsed.commands
         )
+        proposal_items_list.extend(
+            self._file_write_proposal_item(thread, turn, proposal)
+            for proposal in parsed.file_writes
+        )
+        proposal_items = tuple(proposal_items_list)
         for item in proposal_items:
             events.append(
                 event(
@@ -420,6 +429,59 @@ class AgentRuntime:
         )
         return result
 
+    def apply_proposed_file_write(
+        self,
+        thread: ThreadRecord,
+        item_id: str,
+    ) -> ItemRecord:
+        pending_item = self._find_pending_file_write(thread, item_id)
+        path = pending_item.content.get("path")
+        content = pending_item.content.get("content")
+        if not isinstance(path, str) or not isinstance(content, str):
+            raise ValueError(f"invalid file write proposal: {item_id}")
+
+        target, relative = self._resolve_workspace_write_path(thread, path)
+        previous_exists = target.exists()
+        previous_size = target.stat().st_size if previous_exists else 0
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        final_item = ItemRecord(
+            id=pending_item.id,
+            thread_id=thread.id,
+            turn_id=pending_item.turn_id,
+            kind=ItemKind.FILE_WRITE,
+            status=ItemStatus.COMPLETED,
+            content={
+                **pending_item.content,
+                "path": relative,
+                "previous_exists": previous_exists,
+                "previous_size": previous_size,
+                "bytes_written": len(content.encode("utf-8")),
+            },
+            approval=ApprovalState.ACCEPTED,
+            created_at_ms=pending_item.created_at_ms,
+            completed_at_ms=now_ms(),
+        )
+        self.store.append_many(
+            [
+                event(
+                    EventKind.APPROVAL_RESOLVED,
+                    thread_id=thread.id,
+                    turn_id=pending_item.turn_id,
+                    item_id=final_item.id,
+                    payload={"approved": True},
+                ),
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread.id,
+                    turn_id=pending_item.turn_id,
+                    item_id=final_item.id,
+                    payload={"item": final_item},
+                ),
+            ]
+        )
+        return final_item
+
     def _command_proposal_item(
         self,
         thread: ThreadRecord,
@@ -443,7 +505,64 @@ class AgentRuntime:
             approval=ApprovalState.REQUESTED,
         )
 
+    def _file_write_proposal_item(
+        self,
+        thread: ThreadRecord,
+        turn: TurnRecord,
+        proposal: FileWriteProposal,
+    ) -> ItemRecord:
+        content: dict[str, Any] = {
+            "path": proposal.path,
+            "content": proposal.content,
+            "source": "provider_proposal",
+        }
+        if proposal.reason:
+            content["reason"] = proposal.reason
+        try:
+            target, relative = self._resolve_workspace_write_path(thread, proposal.path)
+            content["path"] = relative
+            content["diff"] = self._file_write_diff(target, relative, proposal.content)
+        except ValueError as exc:
+            content["scope_error"] = str(exc)
+        except (OSError, UnicodeError) as exc:
+            content["scope_error"] = str(exc)
+        return ItemRecord(
+            id=new_id("item"),
+            thread_id=thread.id,
+            turn_id=turn.id,
+            kind=ItemKind.FILE_WRITE,
+            status=ItemStatus.PENDING,
+            content=content,
+            approval=ApprovalState.REQUESTED,
+        )
+
     def _find_pending_command(self, thread: ThreadRecord, item_id: str) -> ItemRecord:
+        return self._find_pending_item(
+            thread,
+            item_id,
+            kind=ItemKind.COMMAND,
+            missing_message="command proposal not found",
+            wrong_kind_message="item is not a command proposal",
+        )
+
+    def _find_pending_file_write(self, thread: ThreadRecord, item_id: str) -> ItemRecord:
+        return self._find_pending_item(
+            thread,
+            item_id,
+            kind=ItemKind.FILE_WRITE,
+            missing_message="file write proposal not found",
+            wrong_kind_message="item is not a file write proposal",
+        )
+
+    def _find_pending_item(
+        self,
+        thread: ThreadRecord,
+        item_id: str,
+        *,
+        kind: ItemKind,
+        missing_message: str,
+        wrong_kind_message: str,
+    ) -> ItemRecord:
         item: dict[str, Any] | None = None
         for row in self.store.read_thread(thread.id):
             payload = row.get("payload")
@@ -454,18 +573,18 @@ class AgentRuntime:
                 continue
             item = raw_item
         if item is None:
-            raise ValueError(f"command proposal not found: {item_id}")
-        if item.get("kind") != ItemKind.COMMAND.value:
-            raise ValueError(f"item is not a command proposal: {item_id}")
+            raise ValueError(f"{missing_message}: {item_id}")
+        if item.get("kind") != kind.value:
+            raise ValueError(f"{wrong_kind_message}: {item_id}")
         if item.get("status") != ItemStatus.PENDING.value:
-            raise ValueError(f"command proposal is not pending: {item_id}")
+            raise ValueError(f"{kind.value} proposal is not pending: {item_id}")
         if item.get("approval") != ApprovalState.REQUESTED.value:
-            raise ValueError(f"command proposal is not awaiting approval: {item_id}")
+            raise ValueError(f"{kind.value} proposal is not awaiting approval: {item_id}")
         return ItemRecord(
             id=item_id,
             thread_id=thread.id,
             turn_id=str(item.get("turn_id")),
-            kind=ItemKind.COMMAND,
+            kind=kind,
             status=ItemStatus.PENDING,
             content=dict(item.get("content") if isinstance(item.get("content"), dict) else {}),
             approval=ApprovalState.REQUESTED,
@@ -474,6 +593,38 @@ class AgentRuntime:
                 if isinstance(item.get("created_at_ms"), int)
                 else now_ms()
             ),
+        )
+
+    def _resolve_workspace_write_path(
+        self,
+        thread: ThreadRecord,
+        path: str,
+    ) -> tuple[Path, str]:
+        scope = WorkspaceScope(Path(thread.cwd))
+        target = scope.resolve(path)
+        relative = target.relative_to(scope.root).as_posix()
+        if relative == ".":
+            raise ValueError("path must be a file inside workspace")
+        if scope.is_ignored(relative):
+            raise ValueError(f"path is ignored: {relative}")
+        if target.exists() and target.is_dir():
+            raise ValueError(f"path is a directory: {relative}")
+        return target, relative
+
+    def _file_write_diff(self, target: Path, relative: str, content: str) -> str:
+        if target.exists():
+            old = target.read_text(encoding="utf-8")
+            fromfile = f"a/{relative}"
+        else:
+            old = ""
+            fromfile = "/dev/null"
+        return "".join(
+            unified_diff(
+                old.splitlines(keepends=True),
+                content.splitlines(keepends=True),
+                fromfile=fromfile,
+                tofile=f"b/{relative}",
+            )
         )
 
     def _build_thread_context(

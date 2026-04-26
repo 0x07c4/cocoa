@@ -1,5 +1,6 @@
 from pathlib import Path
 import asyncio
+import json
 import shlex
 import sys
 import unittest
@@ -41,6 +42,28 @@ class ProposalProvider:
                 "\n```"
             ),
             summary="proposal",
+        )
+
+
+class FileProposalProvider:
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        proposal = {
+            "write_files": [
+                {
+                    "path": "hello.txt",
+                    "content": "hello from cocoa\n",
+                    "reason": "create a demo file",
+                }
+            ]
+        }
+        return ProviderResponse(
+            message=(
+                "I can create a file.\n\n"
+                "```cocoa-proposal\n"
+                f"{json.dumps(proposal)}\n"
+                "```"
+            ),
+            summary="file proposal",
         )
 
 
@@ -238,6 +261,99 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(command_result.exit_code, 0)
             self.assertEqual(command_result.stdout.strip(), "proposal")
             self.assertEqual(rows[-1]["payload"]["item"]["status"], "completed")
+
+    def test_runtime_records_provider_file_write_proposals(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, FileProposalProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(runtime.run_user_turn_with_result(thread, "write file"))
+
+            self.assertEqual(result.message, "I can create a file.")
+            self.assertEqual(len(result.proposals), 1)
+            proposal = result.proposals[0]
+            self.assertEqual(proposal.kind, "file_write")
+            self.assertEqual(proposal.status, "pending")
+            self.assertEqual(proposal.approval, "requested")
+            self.assertEqual(proposal.content["path"], "hello.txt")
+            self.assertEqual(proposal.content["reason"], "create a demo file")
+            self.assertIn("+hello from cocoa", proposal.content["diff"])
+
+    def test_runtime_applies_provider_file_write_proposal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, FileProposalProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            turn_result = asyncio.run(runtime.run_user_turn_with_result(thread, "write file"))
+            item = runtime.apply_proposed_file_write(thread, turn_result.proposals[0].id)
+            rows = store.read_thread(thread.id)
+
+            self.assertEqual((tmp_path / "hello.txt").read_text(encoding="utf-8"), "hello from cocoa\n")
+            self.assertEqual(item.status, "completed")
+            self.assertEqual(item.approval, "accepted")
+            self.assertEqual(rows[-1]["payload"]["item"]["status"], "completed")
+
+    def test_runtime_rejects_file_write_path_escape_on_apply(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        class EscapingFileProvider:
+            async def complete(self, request: ProviderRequest) -> ProviderResponse:
+                proposal = {
+                    "write_files": [
+                        {"path": "../outside.txt", "content": "bad", "reason": "escape"}
+                    ]
+                }
+                return ProviderResponse(
+                    message="bad proposal\n```cocoa-proposal\n"
+                    f"{json.dumps(proposal)}\n```",
+                    summary="bad",
+                )
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, EscapingFileProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            turn_result = asyncio.run(runtime.run_user_turn_with_result(thread, "write file"))
+
+            with self.assertRaisesRegex(ValueError, "escapes workspace"):
+                runtime.apply_proposed_file_write(thread, turn_result.proposals[0].id)
+
+    def test_runtime_rejects_ignored_file_write_path_on_apply(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        class IgnoredFileProvider:
+            async def complete(self, request: ProviderRequest) -> ProviderResponse:
+                proposal = {
+                    "write_files": [
+                        {"path": ".cocoa/config.env", "content": "bad", "reason": "ignored"}
+                    ]
+                }
+                return ProviderResponse(
+                    message="bad proposal\n```cocoa-proposal\n"
+                    f"{json.dumps(proposal)}\n```",
+                    summary="bad",
+                )
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, IgnoredFileProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            turn_result = asyncio.run(runtime.run_user_turn_with_result(thread, "write file"))
+
+            with self.assertRaisesRegex(ValueError, "path is ignored"):
+                runtime.apply_proposed_file_write(thread, turn_result.proposals[0].id)
 
 
 if __name__ == "__main__":

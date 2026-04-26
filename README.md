@@ -43,6 +43,7 @@ PYTHONPATH=src python -m cocoa repl
 - `/history`（查看当前 thread 的 turn projection）
 - `/show <id|last>`（查看 turn 或 item projection）
 - `/accept <item_id>`（执行 provider 提出的 pending command proposal）
+- `/apply <item_id>`（应用 provider 提出的 pending file write proposal）
 
 `/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
 REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa-agent[ui]`
@@ -55,13 +56,20 @@ REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa
 
 `/provider` 会显示当前 provider，`/model` 会显示模型（未就绪时显示 `unknown`）。
 
-Provider 可以在普通文本后附一个 `cocoa-proposal` JSON block 来提出命令建议。
-`cocoa` 会把建议记录为 pending `COMMAND` item，只在用户执行 `/accept <item_id>`
-并通过确认后才运行：
+Provider 可以在普通文本后附一个 `cocoa-proposal` JSON block 来提出命令或文件写入建议。
+`cocoa` 会把建议记录为 pending item。命令只在用户执行 `/accept <item_id>` 并通过
+确认后才运行；文件写入会先展示 unified diff，只在用户执行 `/apply <item_id>` 后写入：
 
 ````markdown
 ```cocoa-proposal
-{"commands":[{"command":"python -m unittest discover -s tests -q","reason":"verify changes"}]}
+{
+  "commands": [
+    {"command": "python -m unittest discover -s tests -q", "reason": "verify changes"}
+  ],
+  "write_files": [
+    {"path": "hello.txt", "content": "hello\n", "reason": "create demo file"}
+  ]
+}
 ```
 ````
 
@@ -155,10 +163,10 @@ persistence.
 ## Current Scope
 
 This is an MVP skeleton. It intentionally starts without a model dependency.
-The bundled provider is a stub, and an OpenAI-compatible Chat Completions
-adapter is available through environment variables. The next real step is
-streaming provider deltas and structured proposal items while keeping the
-runtime protocol stable.
+The bundled provider is a stub. OpenAI-compatible, Codex HTTP, and Codex CLI
+adapters are available through environment/config variables. The current coding
+loop supports structured command proposals and file write proposals while
+keeping the runtime protocol stable.
 
 The current implementation records a `Thread`, starts `Turn`s, creates `Item`s,
 and stores lifecycle `Event`s. Events are the append-only trail, not a child
@@ -176,8 +184,9 @@ model is targeted to become:
 5. bounded side effect
 6. recorded event trail
 
-The MVP only implements the recorded event trail and a shell approval gate. File
-preview/apply and agent-generated proposals are next-layer work.
+The MVP implements the recorded event trail, shell approval gate, command
+proposal approval, and file write preview/apply. Richer patch formats, workspace
+read tools, streaming deltas, and rollback are next-layer work.
 
 The CLI is only one projection of the runtime. Future TUI/editor clients should
 read the same event stream rather than inventing their own state model.

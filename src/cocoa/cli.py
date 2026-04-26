@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import __version__
-from .models import ItemRecord
+from .models import ItemKind, ItemRecord
 from .projection import ItemView, TurnView, load_thread_view
 from .providers import (
     ProviderConfigurationError,
@@ -30,6 +30,7 @@ from .workspace import WorkspaceScope
 
 _REPL_COMMANDS = (
     "/accept",
+    "/apply",
     "/configure",
     "/exit",
     "/help",
@@ -50,6 +51,7 @@ _SET_OPTIONS = ("--persist", "-p")
 
 _REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
     "/accept": "run pending command",
+    "/apply": "apply pending file write",
     "/configure": "configure provider",
     "/exit": "quit cocoa",
     "/help": "show commands",
@@ -78,6 +80,7 @@ _SET_OPTION_DESCRIPTIONS: Mapping[str, str] = {
 
 _COMMANDS_EXPECTING_ARGUMENTS = {
     "/accept",
+    "/apply",
     "/configure",
     "/inspect",
     "/run",
@@ -396,6 +399,12 @@ def _completion_candidates(
             for candidate in _pending_command_completion_candidates(store, thread_id)
             if candidate.startswith(text)
         ]
+    if command == "/apply":
+        return [
+            candidate
+            for candidate in _pending_file_write_completion_candidates(store, thread_id)
+            if candidate.startswith(text)
+        ]
     if command == "/inspect":
         return _workspace_path_completion_candidates(cwd, text)
     return []
@@ -478,6 +487,8 @@ def _completion_description(line: str, candidate: str) -> str:
         return "projection target"
     if command == "/accept":
         return "pending command"
+    if command == "/apply":
+        return "pending file write"
     if command == "/inspect":
         return "workspace path"
     return ""
@@ -530,6 +541,19 @@ def _show_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
 
 
 def _pending_command_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
+    return _pending_item_completion_candidates(store, thread_id, kind="command")
+
+
+def _pending_file_write_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
+    return _pending_item_completion_candidates(store, thread_id, kind="file_write")
+
+
+def _pending_item_completion_candidates(
+    store: JsonlStore,
+    thread_id: str,
+    *,
+    kind: str,
+) -> list[str]:
     try:
         view = load_thread_view(store, thread_id)
     except ValueError:
@@ -538,7 +562,7 @@ def _pending_command_completion_candidates(store: JsonlStore, thread_id: str) ->
     for turn in view.turns:
         for item in turn.items:
             if (
-                item.kind == "command"
+                item.kind == kind
                 and item.status == "pending"
                 and item.approval == "requested"
             ):
@@ -1133,18 +1157,33 @@ def _print_provider_config_help() -> None:
     print("/set --persist KEY VALUE")
 
 
-def _print_command_proposals(proposals: tuple[ItemRecord, ...]) -> None:
+def _print_proposals(proposals: tuple[ItemRecord, ...]) -> None:
     if not proposals:
         return
     print()
     print("proposals:")
     for item in proposals:
-        command = item.content.get("command")
-        reason = item.content.get("reason")
-        print(f"  {item.id}: {command}")
-        if isinstance(reason, str) and reason:
-            print(f"    reason: {reason}")
-        print(f"    run: /accept {item.id}")
+        if item.kind == ItemKind.COMMAND:
+            command = item.content.get("command")
+            reason = item.content.get("reason")
+            print(f"  {item.id}: {command}")
+            if isinstance(reason, str) and reason:
+                print(f"    reason: {reason}")
+            print(f"    run: /accept {item.id}")
+            continue
+        if item.kind == ItemKind.FILE_WRITE:
+            path = item.content.get("path")
+            reason = item.content.get("reason")
+            scope_error = item.content.get("scope_error")
+            print(f"  {item.id}: write {path}")
+            if isinstance(reason, str) and reason:
+                print(f"    reason: {reason}")
+            if isinstance(scope_error, str) and scope_error:
+                print(f"    error: {scope_error}")
+            diff = item.content.get("diff")
+            if isinstance(diff, str) and diff:
+                print(textwrap.indent(diff.rstrip(), "    "))
+            print(f"    apply: /apply {item.id}")
 
 
 async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
@@ -1155,7 +1194,7 @@ async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
         thread = runtime.resume_thread(thread_id)
     result = await runtime.run_user_turn_with_result(thread, prompt)
     print(result.message)
-    _print_command_proposals(result.proposals)
+    _print_proposals(result.proposals)
     print()
     print(f"thread: {thread.id}")
     print(f"log: {store.thread_path(thread.id)}")
@@ -1215,6 +1254,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("/history            show turns in current thread")
                 print("/show <id|last>     show a turn or item projection")
                 print("/accept <item_id>   run a pending command proposal")
+                print("/apply <item_id>    apply a pending file write proposal")
                 print("/inspect [path]     list workspace files")
                 print("/run <command>      run shell command after approval")
                 print("/exit               quit")
@@ -1343,6 +1383,23 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if result.exit_code is not None:
                     print(f"exit_code: {result.exit_code}")
                 continue
+            if line == "/apply" or line.startswith("/apply "):
+                _, _, target = line.partition(" ")
+                target = target.strip()
+                if not target:
+                    print("usage: /apply <item_id>")
+                    continue
+                try:
+                    item = runtime.apply_proposed_file_write(thread, target)
+                except ValueError as exc:
+                    print(str(exc))
+                    continue
+                path = item.content.get("path")
+                bytes_written = item.content.get("bytes_written")
+                print(f"applied: {path}")
+                if isinstance(bytes_written, int):
+                    print(f"bytes_written: {bytes_written}")
+                continue
             if line == "/provider":
                 print(f"provider: {_resolve_provider_status_for_env(env)}")
                 continue
@@ -1372,7 +1429,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
 
             result = await runtime.run_user_turn_with_result(thread, line)
             print(result.message)
-            _print_command_proposals(result.proposals)
+            _print_proposals(result.proposals)
     finally:
         repl_input.close()
     print(f"log: {store.thread_path(thread.id)}")

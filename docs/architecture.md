@@ -56,10 +56,14 @@ become more granular:
 - require preview before apply
 - restrict by workspace scope
 
-Provider-originated command suggestions use the same approval boundary. A model
-may emit a `cocoa-proposal` JSON block, but the runtime only records it as a
-pending `COMMAND` item with `approval=requested`. Execution still requires an
-explicit user action such as `/accept <item_id>` plus the shell approval gate.
+Provider-originated side-effect suggestions use the same approval boundary. A
+model may emit a `cocoa-proposal` JSON block, but the runtime only records it as
+pending items with `approval=requested`:
+
+- `COMMAND` proposals require `/accept <item_id>` plus the shell approval gate.
+- `FILE_WRITE` proposals include a unified diff preview and require
+  `/apply <item_id>`. Writes are constrained by `WorkspaceScope`, so ignored
+  paths and paths outside the workspace are rejected.
 
 ## Provider Boundary
 

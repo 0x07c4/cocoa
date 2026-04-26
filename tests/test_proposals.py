@@ -1,6 +1,6 @@
 import unittest
 
-from cocoa.proposals import parse_command_proposals
+from cocoa.proposals import parse_command_proposals, parse_proposals
 
 
 class ProposalTests(unittest.TestCase):
@@ -26,6 +26,21 @@ class ProposalTests(unittest.TestCase):
 
         self.assertEqual(cleaned, "hello")
         self.assertEqual(proposals, ())
+
+    def test_parse_proposals_returns_file_writes(self) -> None:
+        parsed = parse_proposals(
+            "Create the file.\n"
+            "```cocoa-proposal\n"
+            '{"write_files":[{"path":"hello.txt","content":"hello\\n","reason":"demo"}]}'
+            "\n```"
+        )
+
+        self.assertEqual(parsed.message, "Create the file.")
+        self.assertEqual(parsed.commands, ())
+        self.assertEqual(len(parsed.file_writes), 1)
+        self.assertEqual(parsed.file_writes[0].path, "hello.txt")
+        self.assertEqual(parsed.file_writes[0].content, "hello\n")
+        self.assertEqual(parsed.file_writes[0].reason, "demo")
 
 
 if __name__ == "__main__":
