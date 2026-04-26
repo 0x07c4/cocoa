@@ -142,6 +142,49 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("Recent thread context:", str(payload["messages"][1]["content"]))
         self.assertIn("User: first", str(payload["messages"][1]["content"]))
 
+    def test_openai_provider_includes_workspace_context(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(request, timeout: float):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeHTTPResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "provider ok",
+                            }
+                        }
+                    ]
+                }
+            )
+
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(
+                api_key="test-key",
+                model="test-model",
+                base_url="http://provider.example/v1",
+            )
+        )
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            asyncio.run(
+                provider.complete(
+                    ProviderRequest(
+                        thread_id="thr_ctx",
+                        turn_id="turn_ctx",
+                        prompt="new question",
+                        cwd="/tmp/project",
+                        workspace_context="Workspace file map:\n- app.py",
+                    )
+                )
+            )
+
+        payload = captured["payload"]  # type: ignore[assignment]
+        self.assertIn("Workspace context:", str(payload["messages"][1]["content"]))
+        self.assertIn("app.py", str(payload["messages"][1]["content"]))
+
     def test_provider_rejects_missing_text_content(self) -> None:
         provider = OpenAICompatibleProvider(
             OpenAICompatibleConfig(api_key="key", model="model")

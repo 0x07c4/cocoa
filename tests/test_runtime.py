@@ -201,6 +201,79 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("User: first", request.thread_context)
             self.assertIn("Assistant: echo:first", request.thread_context)
 
+    def test_runtime_includes_workspace_map_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "what is here?"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.workspace_context)
+            self.assertIn("Workspace file map", request.workspace_context or "")
+            self.assertIn("app.py", request.workspace_context or "")
+
+    def test_runtime_reads_prompt_path_references_as_context_items(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source = tmp_path / "src" / "app.py"
+            source.parent.mkdir()
+            source.write_text("def main():\n    return 'cocoa'\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(
+                runtime.run_user_turn_with_result(thread, "explain @src/app.py")
+            )
+            rows = store.read_thread(thread.id)
+
+            self.assertEqual(len(result.context_items), 1)
+            item = result.context_items[0]
+            self.assertEqual(item.kind, "file_read")
+            self.assertEqual(item.status, "completed")
+            self.assertEqual(item.content["path"], "src/app.py")
+            self.assertIn("def main", item.content["text"])
+            request = provider.requests[-1]
+            self.assertIn("<file path=\"src/app.py\">", request.workspace_context or "")
+            self.assertIn("return 'cocoa'", request.workspace_context or "")
+            item_kinds = [
+                row["payload"].get("item", {}).get("kind")
+                for row in rows
+                if isinstance(row.get("payload"), dict)
+            ]
+            self.assertIn("file_read", item_kinds)
+
+    def test_runtime_records_failed_prompt_path_reference(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(
+                runtime.run_user_turn_with_result(thread, "explain @missing.py")
+            )
+
+            self.assertEqual(len(result.context_items), 1)
+            item = result.context_items[0]
+            self.assertEqual(item.kind, "file_read")
+            self.assertEqual(item.status, "failed")
+            self.assertEqual(item.content["path"], "missing.py")
+            self.assertIn("unavailable", provider.requests[-1].workspace_context or "")
+
     def test_runtime_can_resume_thread(self) -> None:
         from tempfile import TemporaryDirectory
 

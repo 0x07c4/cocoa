@@ -407,6 +407,8 @@ def _completion_candidates(
         ]
     if command == "/inspect":
         return _workspace_path_completion_candidates(cwd, text)
+    if command == "/run":
+        return _run_completion_candidates(cwd, line, text)
     return []
 
 
@@ -490,6 +492,12 @@ def _completion_description(line: str, candidate: str) -> str:
     if command == "/apply":
         return "pending file write"
     if command == "/inspect":
+        return "workspace path"
+    if command == "/run":
+        raw = line.partition(" ")[2]
+        parts = raw.split()
+        if not parts or (len(parts) == 1 and not raw.endswith(" ")):
+            return "shell command"
         return "workspace path"
     return ""
 
@@ -598,6 +606,40 @@ def _workspace_path_completion_candidates(cwd: Path, text: str) -> list[str]:
         candidate = relative + "/" if child.is_dir() else relative
         candidates.append(candidate)
     return candidates
+
+
+def _run_completion_candidates(cwd: Path, line: str, text: str) -> list[str]:
+    raw = line.partition(" ")[2]
+    parts = raw.split()
+    completing_new_arg = raw.endswith(" ")
+    completing_command = not parts or (len(parts) == 1 and not completing_new_arg)
+    if completing_command and "/" not in text:
+        return _executable_completion_candidates(text)
+    return _workspace_path_completion_candidates(cwd, text)
+
+
+def _executable_completion_candidates(text: str, max_entries: int = 80) -> list[str]:
+    candidates: set[str] = set()
+    for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not raw_directory:
+            continue
+        directory = Path(raw_directory)
+        try:
+            children = directory.iterdir()
+        except OSError:
+            continue
+        for child in children:
+            if len(candidates) >= max_entries:
+                break
+            name = child.name
+            if not name.startswith(text):
+                continue
+            try:
+                if child.is_file() and os.access(child, os.X_OK):
+                    candidates.add(name)
+            except OSError:
+                continue
+    return sorted(candidates)
 
 
 def _create_native_composer(
@@ -1107,6 +1149,18 @@ def _item_preview(item: ItemView) -> str:
         if isinstance(command, str):
             suffix = f" exit={exit_code}" if exit_code is not None else ""
             return textwrap.shorten(command + suffix, width=90)
+    if item.kind == "file_read":
+        path = item.content.get("path")
+        size = item.content.get("size")
+        if isinstance(path, str):
+            suffix = f" ({size} bytes)" if isinstance(size, int) else ""
+            return textwrap.shorten(f"read {path}{suffix}", width=90)
+    if item.kind == "workspace_inspect":
+        path = item.content.get("path")
+        entries = item.content.get("entries")
+        count = len(entries) if isinstance(entries, list) else 0
+        if isinstance(path, str):
+            return textwrap.shorten(f"inspect {path} ({count} entries)", width=90)
     rendered = json.dumps(item.content, ensure_ascii=False, sort_keys=True)
     return textwrap.shorten(rendered, width=90)
 
@@ -1157,6 +1211,37 @@ def _print_provider_config_help() -> None:
     print("/set --persist KEY VALUE")
 
 
+def _print_context_items(items: tuple[ItemRecord, ...]) -> None:
+    if not items:
+        return
+    print()
+    print("context:")
+    for item in items:
+        source = item.content.get("source")
+        if source != "prompt_reference":
+            continue
+        if item.kind == ItemKind.FILE_READ:
+            path = item.content.get("path")
+            if item.status == "failed":
+                error = item.content.get("error")
+                print(f"  {item.id}: read {path} failed")
+                if isinstance(error, str) and error:
+                    print(f"    error: {error}")
+                continue
+            size = item.content.get("size")
+            truncated = item.content.get("truncated")
+            suffix = f" ({size} bytes)" if isinstance(size, int) else ""
+            print(f"  {item.id}: read {path}{suffix}")
+            if truncated is True:
+                print("    truncated for model context")
+            continue
+        if item.kind == ItemKind.WORKSPACE_INSPECT:
+            path = item.content.get("path")
+            entries = item.content.get("entries")
+            count = len(entries) if isinstance(entries, list) else 0
+            print(f"  {item.id}: inspect {path} ({count} entries)")
+
+
 def _print_proposals(proposals: tuple[ItemRecord, ...]) -> None:
     if not proposals:
         return
@@ -1193,6 +1278,7 @@ async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
     else:
         thread = runtime.resume_thread(thread_id)
     result = await runtime.run_user_turn_with_result(thread, prompt)
+    _print_context_items(result.context_items)
     print(result.message)
     _print_proposals(result.proposals)
     print()
@@ -1257,6 +1343,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("/apply <item_id>    apply a pending file write proposal")
                 print("/inspect [path]     list workspace files")
                 print("/run <command>      run shell command after approval")
+                print("@path               include file or directory context in a prompt")
                 print("/exit               quit")
                 continue
             if line == "/configure":
@@ -1428,6 +1515,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 continue
 
             result = await runtime.run_user_turn_with_result(thread, line)
+            _print_context_items(result.context_items)
             print(result.message)
             _print_proposals(result.proposals)
     finally:

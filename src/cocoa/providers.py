@@ -202,6 +202,7 @@ class ProviderRequest:
     prompt: str
     cwd: str
     thread_context: str | None = None
+    workspace_context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -445,6 +446,10 @@ class OpenAICompatibleProvider:
             lines.append("Recent thread context:")
             lines.append(request.thread_context)
             lines.append("")
+        if request.workspace_context:
+            lines.append("Workspace context:")
+            lines.append(request.workspace_context)
+            lines.append("")
         lines.append(request.prompt)
         return "\n".join(lines)
 
@@ -656,6 +661,11 @@ class CodexResponsesProvider:
             + (
                 f"Recent thread context:\n{request.thread_context}\n\n"
                 if request.thread_context
+                else ""
+            )
+            + (
+                f"Workspace context:\n{request.workspace_context}\n\n"
+                if request.workspace_context
                 else ""
             )
             + request.prompt
@@ -883,6 +893,10 @@ class CodexProvider:
         if request.thread_context:
             lines.append("Recent thread context:")
             lines.append(request.thread_context)
+            lines.append("")
+        if request.workspace_context:
+            lines.append("Workspace context:")
+            lines.append(request.workspace_context)
             lines.append("")
         lines.append(request.prompt)
         return "\n".join(lines)

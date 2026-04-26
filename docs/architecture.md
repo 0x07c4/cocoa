@@ -45,6 +45,22 @@ The first CLI projection commands are `/history` and `/show <id|last>`. Future
 TUI/editor surfaces should read the same projection layer instead of inventing a
 separate session state.
 
+## Workspace Context
+
+Every provider request may include a compact workspace context owned by the
+runtime, not by the provider. The first implementation includes a lightweight
+file map for orientation and supports explicit `@path` references in the user
+prompt:
+
+- file references are recorded as `FILE_READ` items
+- directory references are recorded as `WORKSPACE_INSPECT` items
+- ignored paths and paths outside the workspace are rejected by `WorkspaceScope`
+- large files are truncated before entering model context
+
+This keeps the product loop explicit: the user decides which files matter, cocoa
+records what was read, and the provider receives enough context to propose real
+workspace changes.
+
 ## Approval Boundary
 
 The MVP asks for human approval before every shell command. Later policy can

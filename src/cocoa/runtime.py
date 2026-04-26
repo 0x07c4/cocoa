@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from difflib import unified_diff
 from pathlib import Path
@@ -29,7 +30,23 @@ from .workspace import WorkspaceScope
 @dataclass(frozen=True)
 class UserTurnResult:
     message: str
+    context_items: tuple[ItemRecord, ...] = ()
     proposals: tuple[ItemRecord, ...] = ()
+
+
+@dataclass(frozen=True)
+class WorkspaceContext:
+    text: str | None
+    items: tuple[ItemRecord, ...] = ()
+
+
+_PATH_REFERENCE_RE = re.compile(
+    r"(?<![\w@])@(?P<path>[A-Za-z0-9][A-Za-z0-9._/\-]*)(?=$|[\s,.;:!?)}\]])"
+)
+_MAX_WORKSPACE_MAP_ENTRIES = 80
+_MAX_CONTEXT_REFERENCES = 6
+_MAX_CONTEXT_FILE_BYTES = 32_000
+_MAX_WORKSPACE_CONTEXT_CHARS = 90_000
 
 
 class AgentRuntime:
@@ -140,6 +157,18 @@ class AgentRuntime:
     ) -> UserTurnResult:
         turn = self.start_turn(thread, intent="conversation", user_text=prompt)
         context = self._build_thread_context(thread, skip_turn_id=turn.id)
+        workspace_context = self._build_workspace_context(thread, turn, prompt)
+        if workspace_context.items:
+            self.store.append_many(
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    item_id=item.id,
+                    payload={"item": item},
+                )
+                for item in workspace_context.items
+            )
         try:
             response = await self.provider.complete(
                 ProviderRequest(
@@ -148,6 +177,7 @@ class AgentRuntime:
                     prompt=prompt,
                     cwd=thread.cwd,
                     thread_context=context,
+                    workspace_context=workspace_context.text,
                 )
             )
         except Exception as exc:
@@ -217,7 +247,11 @@ class AgentRuntime:
             status=TurnStatus.COMPLETED,
             summary=response.summary,
         )
-        return UserTurnResult(message=message, proposals=proposal_items)
+        return UserTurnResult(
+            message=message,
+            context_items=workspace_context.items,
+            proposals=proposal_items,
+        )
 
     async def run_shell_turn(
         self,
@@ -535,6 +569,184 @@ class AgentRuntime:
             content=content,
             approval=ApprovalState.REQUESTED,
         )
+
+    def _build_workspace_context(
+        self,
+        thread: ThreadRecord,
+        turn: TurnRecord,
+        prompt: str,
+    ) -> WorkspaceContext:
+        scope = WorkspaceScope(Path(thread.cwd))
+        sections: list[str] = []
+        items: list[ItemRecord] = []
+
+        workspace_map = self._workspace_map_context(scope)
+        if workspace_map:
+            sections.append(workspace_map)
+
+        references = self._extract_path_references(prompt)
+        if references:
+            reference_sections = ["Referenced workspace paths:"]
+            for raw_path in references[:_MAX_CONTEXT_REFERENCES]:
+                item, context_text = self._referenced_path_context_item(
+                    thread,
+                    turn,
+                    scope,
+                    raw_path,
+                )
+                items.append(item)
+                reference_sections.append(context_text)
+            skipped = len(references) - _MAX_CONTEXT_REFERENCES
+            if skipped > 0:
+                reference_sections.append(
+                    f"- skipped {skipped} additional @path reference(s)"
+                )
+            sections.append("\n\n".join(reference_sections))
+
+        text = "\n\n".join(section for section in sections if section.strip()).strip()
+        if not text:
+            return WorkspaceContext(text=None, items=tuple(items))
+        if len(text) > _MAX_WORKSPACE_CONTEXT_CHARS:
+            text = (
+                text[:_MAX_WORKSPACE_CONTEXT_CHARS]
+                + "\n\n[workspace context truncated by cocoa]"
+            )
+        return WorkspaceContext(text=text, items=tuple(items))
+
+    def _workspace_map_context(self, scope: WorkspaceScope) -> str | None:
+        try:
+            entries = scope.inspect(".", max_entries=_MAX_WORKSPACE_MAP_ENTRIES)
+        except (OSError, ValueError) as exc:
+            return f"Workspace file map unavailable: {exc}"
+        if not entries:
+            return "Workspace file map: empty workspace"
+        lines = [
+            f"Workspace file map (first {len(entries)} visible entries; ignored paths omitted):"
+        ]
+        for entry in entries:
+            lines.append(f"- {entry.path} ({entry.size} bytes)")
+        return "\n".join(lines)
+
+    def _extract_path_references(self, prompt: str) -> tuple[str, ...]:
+        seen: set[str] = set()
+        references: list[str] = []
+        for match in _PATH_REFERENCE_RE.finditer(prompt):
+            path = match.group("path").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            references.append(path)
+        return tuple(references)
+
+    def _referenced_path_context_item(
+        self,
+        thread: ThreadRecord,
+        turn: TurnRecord,
+        scope: WorkspaceScope,
+        raw_path: str,
+    ) -> tuple[ItemRecord, str]:
+        try:
+            target = scope.resolve(raw_path)
+            relative = target.relative_to(scope.root).as_posix()
+            if scope.is_ignored(relative):
+                raise ValueError(f"path is ignored: {relative}")
+            if not target.exists():
+                raise FileNotFoundError(relative)
+            if target.is_dir():
+                return self._referenced_directory_context_item(
+                    thread,
+                    turn,
+                    scope,
+                    relative,
+                )
+            if target.is_file():
+                return self._referenced_file_context_item(
+                    thread,
+                    turn,
+                    target,
+                    relative,
+                )
+            raise ValueError(f"path is not a regular file or directory: {relative}")
+        except (OSError, UnicodeError, ValueError) as exc:
+            item = ItemRecord(
+                id=new_id("item"),
+                thread_id=thread.id,
+                turn_id=turn.id,
+                kind=ItemKind.FILE_READ,
+                status=ItemStatus.FAILED,
+                content={
+                    "path": raw_path,
+                    "source": "prompt_reference",
+                    "error": str(exc),
+                },
+                completed_at_ms=now_ms(),
+            )
+            return item, f"- @{raw_path}: unavailable ({exc})"
+
+    def _referenced_file_context_item(
+        self,
+        thread: ThreadRecord,
+        turn: TurnRecord,
+        target: Path,
+        relative: str,
+    ) -> tuple[ItemRecord, str]:
+        size = target.stat().st_size
+        with target.open("rb") as handle:
+            raw = handle.read(_MAX_CONTEXT_FILE_BYTES + 1)
+        if b"\x00" in raw:
+            raise UnicodeError(f"file appears to be binary: {relative}")
+        truncated = len(raw) > _MAX_CONTEXT_FILE_BYTES
+        text = raw[:_MAX_CONTEXT_FILE_BYTES].decode("utf-8", errors="replace")
+        item = ItemRecord(
+            id=new_id("item"),
+            thread_id=thread.id,
+            turn_id=turn.id,
+            kind=ItemKind.FILE_READ,
+            status=ItemStatus.COMPLETED,
+            content={
+                "path": relative,
+                "size": size,
+                "truncated": truncated,
+                "source": "prompt_reference",
+                "text": text,
+            },
+            completed_at_ms=now_ms(),
+        )
+        header = f"@{relative} ({size} bytes"
+        if truncated:
+            header += f", first {_MAX_CONTEXT_FILE_BYTES} bytes"
+        header += ")"
+        context_text = f"{header}\n<file path=\"{relative}\">\n{text}\n</file>"
+        return item, context_text
+
+    def _referenced_directory_context_item(
+        self,
+        thread: ThreadRecord,
+        turn: TurnRecord,
+        scope: WorkspaceScope,
+        relative: str,
+    ) -> tuple[ItemRecord, str]:
+        entries = scope.inspect(relative, max_entries=_MAX_WORKSPACE_MAP_ENTRIES)
+        payload_entries = [{"path": entry.path, "size": entry.size} for entry in entries]
+        item = ItemRecord(
+            id=new_id("item"),
+            thread_id=thread.id,
+            turn_id=turn.id,
+            kind=ItemKind.WORKSPACE_INSPECT,
+            status=ItemStatus.COMPLETED,
+            content={
+                "path": relative,
+                "entries": payload_entries,
+                "source": "prompt_reference",
+            },
+            completed_at_ms=now_ms(),
+        )
+        lines = [f"@{relative}/ directory listing:"]
+        for entry in entries:
+            lines.append(f"- {entry.path} ({entry.size} bytes)")
+        if len(entries) >= _MAX_WORKSPACE_MAP_ENTRIES:
+            lines.append(f"- ... capped at {_MAX_WORKSPACE_MAP_ENTRIES} entries")
+        return item, "\n".join(lines)
 
     def _find_pending_command(self, thread: ThreadRecord, item_id: str) -> ItemRecord:
         return self._find_pending_item(

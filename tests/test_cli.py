@@ -317,6 +317,48 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("src/", candidates)
 
+    def test_repl_completion_includes_run_commands(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bin_path = tmp_path / "bin"
+            bin_path.mkdir()
+            tool = bin_path / "cocoa-cat"
+            tool.write_text("#!/bin/sh\n", encoding="utf-8")
+            tool.chmod(0o755)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            with mock.patch.dict(os.environ, {"PATH": str(bin_path)}):
+                candidates = _completion_candidates(
+                    "/run cocoa-c",
+                    "cocoa-c",
+                    cwd=tmp_path,
+                    store=store,
+                    thread_id=thread.id,
+                )
+
+        self.assertIn("cocoa-cat", candidates)
+
+    def test_repl_completion_includes_run_argument_paths(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "tmp").mkdir()
+            (tmp_path / "tmp" / "cocoa-demo.txt").write_text("hello\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            candidates = _completion_candidates(
+                "/run cat tmp/c",
+                "tmp/c",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn("tmp/cocoa-demo.txt", candidates)
+
     def test_repl_suggestions_show_commands_without_tab(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
