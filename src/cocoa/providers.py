@@ -126,6 +126,8 @@ def _read_jwt_expiry_seconds(token: str) -> float | None:
     if not isinstance(claims, dict):
         return None
     exp = claims.get("exp")
+    if exp is None:
+        return None
     try:
         return float(exp)
     except (TypeError, ValueError):
@@ -293,17 +295,16 @@ class CodexResponsesConfig:
 
         api_key = _resolve_codex_api_key(env)
         base_url = env.get("COCOA_CODEX_BASE_URL") or env.get("OPENAI_BASE_URL")
-        model = _resolve_codex_model(env, api_key=api_key, base_url=(base_url or cls.base_url).rstrip("/"))
-        if not api_key or not model:
+        if not api_key:
             missing = []
-            if not api_key:
-                codex_home = _codex_home_from_env(env)
-                auth_path = codex_home / "auth.json"
-                missing.append(
-                    "COCOA_CODEX_API_KEY or OPENAI_API_KEY or OPENAI_TOKEN or CODEX_API_KEY "
-                    f"or a valid token in {auth_path}"
-                )
+            codex_home = _codex_home_from_env(env)
+            auth_path = codex_home / "auth.json"
+            missing.append(
+                "COCOA_CODEX_API_KEY or OPENAI_API_KEY or OPENAI_TOKEN or CODEX_API_KEY "
+                f"or a valid token in {auth_path}"
+            )
             raise ProviderConfigurationError("missing " + ", ".join(missing))
+        model = _resolve_codex_model(env, api_key=api_key, base_url=(base_url or cls.base_url).rstrip("/"))
 
         timeout_raw = env.get("COCOA_CODEX_TIMEOUT_SECONDS")
         temperature_raw = env.get("COCOA_CODEX_TEMPERATURE")
@@ -482,8 +483,10 @@ class OpenAICompatibleProvider:
             return body[:500] or "(empty error body)"
         if isinstance(data, dict):
             error = data.get("error")
-            if isinstance(error, dict) and isinstance(error.get("message"), str):
-                return error["message"]
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str):
+                    return message
         return body[:500] or "(empty error body)"
 
 
@@ -511,6 +514,7 @@ class CodexResponsesProvider:
             raise ProviderHTTPError(f"provider connection failed: {exc.reason}") from exc
 
         stream_events = None
+        message: str | None
         try:
             data = json.loads(raw)
             if isinstance(data, dict):
@@ -643,7 +647,8 @@ class CodexResponsesProvider:
                 http_request,
                 timeout=self.config.timeout_seconds,
             ) as response:
-                return response.read().decode("utf-8")
+                raw = response.read().decode("utf-8")
+                return str(raw)
         except urllib.error.HTTPError as exc:
             try:
                 error_body = exc.read().decode("utf-8", errors="replace")
@@ -681,8 +686,9 @@ class CodexResponsesProvider:
             if text:
                 return text
 
-        if isinstance(data.get("output_text"), str):
-            out = data.get("output_text").strip()
+        output_text = data.get("output_text")
+        if isinstance(output_text, str):
+            out = output_text.strip()
             if out:
                 return out
 
@@ -764,8 +770,9 @@ class CodexResponsesProvider:
         if isinstance(parsed, dict):
             if isinstance(parsed.get("error"), dict):
                 error = parsed["error"]
-                if isinstance(error.get("message"), str):
-                    return error["message"]
+                message = error.get("message")
+                if isinstance(message, str):
+                    return message
             message = parsed.get("message")
             if isinstance(message, str):
                 return message
@@ -809,7 +816,13 @@ class CodexProvider:
 
         return ProviderResponse(message=message, summary=message[:80])
 
-    def _run_codex(self, command: list[str], *, env: dict[str, str], timeout: float):
+    def _run_codex(
+        self,
+        command: list[str],
+        *,
+        env: dict[str, str],
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
         completed = subprocess.run(
             command,
             env=env,
@@ -969,15 +982,15 @@ def provider_from_env(env: Mapping[str, str] = os.environ) -> ProviderAdapter:
     if provider in {"", "stub"}:
         return StubProvider()
     if provider in {"openai", "openai-compatible"}:
-        config = OpenAICompatibleConfig.from_env(env, provider=provider)
-        if config is None:
+        openai_config = OpenAICompatibleConfig.from_env(env, provider=provider)
+        if openai_config is None:
             raise ProviderConfigurationError("missing OpenAI configuration")
-        return OpenAICompatibleProvider(config)
+        return OpenAICompatibleProvider(openai_config)
     if provider in {"codex-http", "codex-responses", "openai-codex"}:
-        config = CodexResponsesConfig.from_env(env, provider=provider)
-        if config is None:
+        codex_responses_config = CodexResponsesConfig.from_env(env, provider=provider)
+        if codex_responses_config is None:
             raise ProviderConfigurationError("missing OpenAI-compatible configuration")
-        return CodexResponsesProvider(config)
+        return CodexResponsesProvider(codex_responses_config)
     if provider == "codex":
         return CodexProvider(CodexConfig.from_env(env))
     raise ProviderConfigurationError(f"unsupported provider: {provider}")
@@ -988,19 +1001,19 @@ def provider_name_from_env(env: Mapping[str, str] = os.environ) -> str:
     if provider in {"", "stub"}:
         return "stub"
     if provider in {"openai", "openai-compatible"}:
-        config = OpenAICompatibleConfig.from_env(env, provider=provider)
-        if config is None:
+        openai_config = OpenAICompatibleConfig.from_env(env, provider=provider)
+        if openai_config is None:
             raise ProviderConfigurationError("missing OpenAI configuration")
-        return f"openai-compatible:{config.model}"
+        return f"openai-compatible:{openai_config.model}"
     if provider in {"codex-http", "codex-responses", "openai-codex"}:
-        config = CodexResponsesConfig.from_env(env, provider=provider)
-        if config is None:
+        codex_responses_config = CodexResponsesConfig.from_env(env, provider=provider)
+        if codex_responses_config is None:
             raise ProviderConfigurationError("missing OpenAI-compatible configuration")
-        return f"codex-http:{config.model}"
+        return f"codex-http:{codex_responses_config.model}"
     if provider == "codex":
-        config = CodexConfig.from_env(env, provider=provider)
-        if config.model:
-            return f"codex:{config.model}"
+        codex_config = CodexConfig.from_env(env, provider=provider)
+        if codex_config.model:
+            return f"codex:{codex_config.model}"
         return "codex"
     raise ProviderConfigurationError(f"unsupported provider: {provider}")
 

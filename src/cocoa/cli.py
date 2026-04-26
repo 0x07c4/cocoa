@@ -136,11 +136,12 @@ class ReplInput:
 
     def read(self, provider_status: str) -> str:
         if self._session is not None:
-            return self._session.prompt(
+            response = self._session.prompt(
                 _prompt_toolkit_fragments(provider_status, self.thread_id),
                 bottom_toolbar=_prompt_toolkit_toolbar(provider_status),
                 wrap_lines=True,
             )
+            return str(response)
         if self._native_composer is not None:
             return self._native_composer.read(provider_status)
         return input(_format_repl_prompt(provider_status, self.thread_id, color=self.color))
@@ -1006,7 +1007,7 @@ def _create_prompt_toolkit_session(
     except ImportError:
         return None
 
-    class CocoaCompleter(Completer):  # type: ignore[misc]
+    class CocoaCompleter(Completer):
         def get_completions(
             self,
             document: object,
@@ -1644,22 +1645,22 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if not command:
                     print("missing command")
                     continue
-                result = await runtime.run_shell_turn(thread, command, shell)
-                if result.stdout:
-                    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-                if result.stderr:
-                    print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
-                if result.exit_code is not None:
-                    print(f"exit_code: {result.exit_code}")
+                shell_result = await runtime.run_shell_turn(thread, command, shell)
+                if shell_result.stdout:
+                    print(shell_result.stdout, end="" if shell_result.stdout.endswith("\n") else "\n")
+                if shell_result.stderr:
+                    print(shell_result.stderr, end="" if shell_result.stderr.endswith("\n") else "\n")
+                if shell_result.exit_code is not None:
+                    print(f"exit_code: {shell_result.exit_code}")
                 continue
             if line.startswith("/"):
                 print("unknown command. type /help for commands.")
                 continue
 
-            result = await runtime.run_user_turn_with_result(thread, line)
-            _print_context_items(result.context_items)
-            print(result.message)
-            _print_proposals(result.proposals)
+            turn_result = await runtime.run_user_turn_with_result(thread, line)
+            _print_context_items(turn_result.context_items)
+            print(turn_result.message)
+            _print_proposals(turn_result.proposals)
     finally:
         repl_input.close()
     print(f"log: {store.thread_path(thread.id)}")

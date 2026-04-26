@@ -861,19 +861,20 @@ class AgentRuntime:
             raise ValueError(f"{kind.value} proposal is not pending: {item_id}")
         if item.get("approval") != ApprovalState.REQUESTED.value:
             raise ValueError(f"{kind.value} proposal is not awaiting approval: {item_id}")
+        raw_content = item.get("content")
+        content = dict(raw_content) if isinstance(raw_content, dict) else {}
+        created_at_ms = item.get("created_at_ms")
+        if not isinstance(created_at_ms, int):
+            created_at_ms = now_ms()
         return ItemRecord(
             id=item_id,
             thread_id=thread.id,
             turn_id=str(item.get("turn_id")),
             kind=kind,
             status=ItemStatus.PENDING,
-            content=dict(item.get("content") if isinstance(item.get("content"), dict) else {}),
+            content=content,
             approval=ApprovalState.REQUESTED,
-            created_at_ms=(
-                item.get("created_at_ms")
-                if isinstance(item.get("created_at_ms"), int)
-                else now_ms()
-            ),
+            created_at_ms=created_at_ms,
         )
 
     def _resolve_workspace_write_path(
