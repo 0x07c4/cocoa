@@ -44,6 +44,10 @@ PYTHONPATH=src python -m cocoa repl
 - `/show <id|last>`（查看 turn 或 item projection）
 
 `/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
+REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa-agent[ui]`
+后会自动使用 `prompt_toolkit` 的 styled session；否则降级为 stdlib 输入框。
+在支持 GNU readline 的终端里，fallback 输入框仍支持 Tab 补全 slash commands、`/show`
+的 turn/item id，以及 `/inspect` 的工作区路径。
 
 `/provider` 会显示当前 provider，`/model` 会显示模型（未就绪时显示 `unknown`）。
 

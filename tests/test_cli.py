@@ -11,7 +11,9 @@ from unittest import mock
 
 from cocoa.cli import (
     run_repl,
+    _completion_candidates,
     _effective_environment,
+    _format_repl_prompt,
     _persist_environment,
     _parse_config_lines,
     _is_provider_configured,
@@ -19,6 +21,9 @@ from cocoa.cli import (
     _resolve_provider_status,
     build_parser,
 )
+from cocoa.providers import StubProvider
+from cocoa.runtime import AgentRuntime
+from cocoa.store import JsonlStore
 
 
 class CliTests(unittest.TestCase):
@@ -250,6 +255,71 @@ class CliTests(unittest.TestCase):
         self.assertIn("user_message", logs)
         self.assertIn("agent_message", logs)
         self.assertIn("Provider is not configured yet.", logs)
+
+    def test_repl_completion_includes_slash_commands(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            candidates = _completion_candidates(
+                "/hi",
+                "/hi",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn("/history", candidates)
+
+    def test_repl_completion_includes_show_targets(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+            asyncio.run(runtime.run_user_turn(thread, "hello"))
+
+            candidates = _completion_candidates(
+                "/show ",
+                "",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn("last", candidates)
+        self.assertTrue(any(candidate.startswith("turn_") for candidate in candidates))
+        self.assertTrue(any(candidate.startswith("item_") for candidate in candidates))
+
+    def test_repl_completion_includes_workspace_paths(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "src").mkdir()
+            (tmp_path / "src" / "app.py").write_text("", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            candidates = _completion_candidates(
+                "/inspect s",
+                "s",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn("src/", candidates)
+
+    def test_repl_prompt_is_boxed_and_includes_status(self) -> None:
+        prompt = _format_repl_prompt(
+            "stub",
+            "thr_test",
+            color=False,
+        )
+
+        self.assertEqual(prompt, "+-- cocoa  stub  thr_test\n+> ")
 
 
     def test_persist_environment_overwrites_keys(self) -> None:

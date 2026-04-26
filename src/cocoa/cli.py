@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import textwrap
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Mapping
 
@@ -23,6 +24,55 @@ from .runtime import AgentRuntime
 from .store import JsonlStore
 from .tools import ConsoleApprovalPrompter, ShellTool
 from .workspace import WorkspaceScope
+
+_REPL_COMMANDS = (
+    "/configure",
+    "/exit",
+    "/help",
+    "/history",
+    "/inspect",
+    "/model",
+    "/persist",
+    "/provider",
+    "/quit",
+    "/run",
+    "/set",
+    "/show",
+    "/status",
+)
+
+_CONFIGURE_MODES = ("clear", "codex-http", "openai")
+_SET_OPTIONS = ("--persist", "-p")
+
+
+class ReplInput:
+    def __init__(self, cwd: Path, store: JsonlStore, thread_id: str) -> None:
+        self.cwd = cwd
+        self.store = store
+        self.thread_id = thread_id
+        self.color = _should_use_color()
+        self._session = (
+            _create_prompt_toolkit_session(cwd, store, thread_id)
+            if sys.stdin.isatty()
+            else None
+        )
+        self._restore_readline = (
+            _install_repl_completion(cwd, store, thread_id)
+            if sys.stdin.isatty() and self._session is None
+            else (lambda: None)
+        )
+
+    def read(self, provider_status: str) -> str:
+        if self._session is not None:
+            return self._session.prompt(
+                _prompt_toolkit_fragments(provider_status, self.thread_id),
+                bottom_toolbar=_prompt_toolkit_toolbar(provider_status),
+                wrap_lines=True,
+            )
+        return input(_format_repl_prompt(provider_status, self.thread_id, color=self.color))
+
+    def close(self) -> None:
+        self._restore_readline()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -252,6 +302,209 @@ def print_show(store: JsonlStore, thread_id: str, target: str) -> None:
     print(f"not found: {target}")
 
 
+def _completion_candidates(
+    line: str,
+    text: str,
+    *,
+    cwd: Path,
+    store: JsonlStore,
+    thread_id: str,
+) -> list[str]:
+    if not line.startswith("/"):
+        return []
+
+    command, has_space, _ = line.partition(" ")
+    if not has_space:
+        return [command for command in _REPL_COMMANDS if command.startswith(text)]
+
+    if command == "/configure":
+        return [mode for mode in _CONFIGURE_MODES if mode.startswith(text)]
+    if command == "/set":
+        return [option for option in _SET_OPTIONS if option.startswith(text)]
+    if command == "/show":
+        return [
+            candidate
+            for candidate in _show_completion_candidates(store, thread_id)
+            if candidate.startswith(text)
+        ]
+    if command == "/inspect":
+        return _workspace_path_completion_candidates(cwd, text)
+    return []
+
+
+def _show_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
+    candidates = ["last", "."]
+    try:
+        view = load_thread_view(store, thread_id)
+    except ValueError:
+        return candidates
+
+    for turn in view.turns:
+        candidates.append(turn.id)
+        for item in turn.items:
+            candidates.append(item.id)
+    return candidates
+
+
+def _workspace_path_completion_candidates(cwd: Path, text: str) -> list[str]:
+    scope = WorkspaceScope(cwd)
+    raw_path = Path(text)
+    raw_parent = raw_path.parent if raw_path.parent.as_posix() != "." else Path(".")
+    name_prefix = raw_path.name
+
+    try:
+        parent = scope.resolve(raw_parent)
+    except ValueError:
+        return []
+    if not parent.is_dir():
+        return []
+
+    candidates: list[str] = []
+    try:
+        children = sorted(parent.iterdir(), key=lambda path: path.name)
+    except OSError:
+        return []
+
+    for child in children:
+        relative = child.relative_to(scope.root).as_posix()
+        if scope.is_ignored(relative):
+            continue
+        if not child.name.startswith(name_prefix):
+            continue
+        candidate = relative + "/" if child.is_dir() else relative
+        candidates.append(candidate)
+    return candidates
+
+
+def _create_prompt_toolkit_session(
+    cwd: Path,
+    store: JsonlStore,
+    thread_id: str,
+) -> object | None:
+    try:
+        from prompt_toolkit import PromptSession  # type: ignore[import-not-found]
+        from prompt_toolkit.completion import Completer, Completion  # type: ignore[import-not-found]
+        from prompt_toolkit.history import FileHistory  # type: ignore[import-not-found]
+        from prompt_toolkit.styles import Style  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+
+    class CocoaCompleter(Completer):  # type: ignore[misc]
+        def get_completions(
+            self,
+            document: object,
+            complete_event: object,
+        ) -> Iterator[object]:
+            text_before = getattr(document, "text_before_cursor", "")
+            get_word = getattr(document, "get_word_before_cursor")
+            word = get_word(WORD=True)
+            for candidate in _completion_candidates(
+                text_before,
+                word,
+                cwd=cwd,
+                store=store,
+                thread_id=thread_id,
+            ):
+                yield Completion(candidate, start_position=-len(word))
+
+    history_path = cwd / ".cocoa" / "input_history"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    return PromptSession(
+        history=FileHistory(str(history_path)),
+        completer=CocoaCompleter(),
+        complete_while_typing=True,
+        style=Style.from_dict(
+            {
+                "box": "#6b7280",
+                "title": "bold #f8fafc",
+                "meta": "#94a3b8",
+                "prompt": "bold #38bdf8",
+                "toolbar": "bg:#111827 #94a3b8",
+                "toolbar.good": "bg:#111827 #86efac bold",
+                "toolbar.warn": "bg:#111827 #facc15 bold",
+            }
+        ),
+    )
+
+
+def _prompt_toolkit_fragments(provider_status: str, thread_id: str) -> list[tuple[str, str]]:
+    return [
+        ("class:box", "+-- "),
+        ("class:title", "cocoa"),
+        ("class:meta", f"  {provider_status}  {thread_id}\n"),
+        ("class:prompt", "+> "),
+    ]
+
+
+def _prompt_toolkit_toolbar(provider_status: str) -> list[tuple[str, str]]:
+    style = "class:toolbar.good" if _provider_ready_status(provider_status) else "class:toolbar.warn"
+    return [
+        ("class:toolbar", " Tab completes  "),
+        ("class:toolbar", " /help commands  "),
+        (style, f" {provider_status} "),
+    ]
+
+
+def _format_repl_prompt(provider_status: str, thread_id: str, *, color: bool) -> str:
+    title = _ansi("cocoa", "1;36", color)
+    meta = _ansi(f"{provider_status}  {thread_id}", "2", color)
+    prompt = _ansi("+> ", "1;36", color)
+    rule = _ansi("+--", "2", color)
+    return f"{rule} {title}  {meta}\n{prompt}"
+
+
+def _provider_ready_status(provider_status: str) -> bool:
+    return provider_status != "stub" and not provider_status.startswith("not configured (")
+
+
+def _should_use_color() -> bool:
+    return sys.stdin.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def _ansi(text: str, code: str, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _install_repl_completion(
+    cwd: Path,
+    store: JsonlStore,
+    thread_id: str,
+) -> Callable[[], None]:
+    try:
+        import readline
+    except ImportError:
+        return lambda: None
+
+    previous_completer = readline.get_completer()
+    previous_delims = readline.get_completer_delims()
+
+    def completer(text: str, state: int) -> str | None:
+        line = readline.get_line_buffer()
+        matches = _completion_candidates(
+            line,
+            text,
+            cwd=cwd,
+            store=store,
+            thread_id=thread_id,
+        )
+        try:
+            return matches[state]
+        except IndexError:
+            return None
+
+    readline.set_completer(completer)
+    readline.set_completer_delims(" \t\n")
+    readline.parse_and_bind("tab: complete")
+
+    def restore() -> None:
+        readline.set_completer(previous_completer)
+        readline.set_completer_delims(previous_delims)
+
+    return restore
+
+
 def _resolve_provider_status(env: Mapping[str, str] | None = None) -> str:
     # keep backwards compatibility for callers that pass no env
     source = dict(os.environ) if env is None else dict(env)
@@ -404,168 +657,171 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
         print("provider not ready, type /configure for setup, /help for commands")
     print("type /help for commands, /exit to quit")
 
-    while True:
-        try:
-            line = input("cocoa> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-
-        if not line:
-            continue
-        if line in {"/exit", "/quit"}:
-            break
-        if line == "/help":
-            print("/help               show commands")
-            print("/status             show session status")
-            print("/provider           show provider status")
-            print("/model              show model selection")
-            print("/configure          configure provider in session or save config")
-            print("/set [--persist|-p] KEY VALUE")
-            print("                    set session variable (and optionally persist)")
-            print("/persist            persist current session overrides to .cocoa/config.env")
-            print("/history            show turns in current thread")
-            print("/show <id|last>     show a turn or item projection")
-            print("/inspect [path]     list workspace files")
-            print("/run <command>      run shell command after approval")
-            print("/exit               quit")
-            continue
-        if line == "/configure":
-            _print_provider_config_help()
-            continue
-        if line.startswith("/configure "):
-            _, _, raw = line.partition(" ")
-            args = shlex.split(raw)
-            if not args:
-                print("usage: /configure <openai|codex-http|codex> <args...>")
-                continue
-            mode = args[0].lower()
-            if mode == "openai":
-                if len(args) < 3:
-                    print("usage: /configure openai <api_key> <model> [base_url]")
-                    continue
-                updates = {"COCOA_PROVIDER": "openai", "COCOA_OPENAI_API_KEY": args[1], "COCOA_OPENAI_MODEL": args[2]}
-                if len(args) > 3:
-                    updates["COCOA_OPENAI_BASE_URL"] = args[3]
-                _persist_environment(cwd, updates)
-                overrides.clear()
-                rebuild_runtime()
-                env = _effective_session_environment(cwd, overrides)
-                print("provider config persisted to .cocoa/config.env")
-                print_provider_status()
-                continue
-            if mode == "codex-http":
-                updates = {"COCOA_PROVIDER": "codex-http"}
-                if len(args) > 1:
-                    updates["COCOA_CODEX_MODEL"] = args[1]
-                    if len(args) > 2:
-                        updates["COCOA_CODEX_API_KEY"] = args[2]
-                _persist_environment(cwd, updates)
-                overrides.clear()
-                rebuild_runtime()
-                env = _effective_session_environment(cwd, overrides)
-                print("provider config persisted to .cocoa/config.env")
-                print_provider_status()
-                continue
-            if mode == "clear":
-                _persist_environment(cwd, {"COCOA_PROVIDER": ""})
-                overrides.clear()
-                rebuild_runtime()
-                env = _effective_session_environment(cwd, overrides)
-                print("provider override cleared in workspace config")
-                continue
-            print("unknown /configure mode. use openai | codex-http | clear")
-            continue
-        if line.startswith("/set "):
-            _, _, raw = line.partition(" ")
+    repl_input = ReplInput(cwd, store, thread.id)
+    try:
+        while True:
             try:
-                tokens = shlex.split(raw)
-            except ValueError:
-                print("invalid quoting in command")
-                continue
-            persist = False
-            if not tokens:
-                print("usage: /set [--persist|-p] KEY VALUE")
-                continue
-            if tokens[0] in {"-p", "--persist"}:
-                persist = True
-                tokens = tokens[1:]
-            if not tokens:
-                print("usage: /set [--persist|-p] KEY VALUE")
-                continue
-            if "=" in tokens[0] and len(tokens) == 1:
-                key, value = tokens[0].split("=", 1)
-            elif len(tokens) >= 2:
-                key = tokens[0]
-                value = " ".join(tokens[1:])
-            else:
-                print("usage: /set [--persist|-p] KEY VALUE")
-                continue
-            if not key:
-                print("missing variable name")
-                continue
-            set_and_reload_env(key, value)
-            env = _effective_session_environment(cwd, overrides)
-            if persist:
-                _persist_environment(cwd, {key: value})
-            print(
-                f"{key} {'persisted and ' if persist else ''}set"
-            )
-            print_provider_status()
-            continue
-        if line == "/persist":
-            if not overrides:
-                print("no session overrides to persist")
-                continue
-            _persist_environment(cwd, overrides)
-            print("session overrides persisted to .cocoa/config.env")
-            continue
-        if line == "/status":
-            print(f"thread: {thread.id}")
-            print(f"cwd: {cwd}")
-            print(f"log: {store.thread_path(thread.id)}")
-            continue
-        if line == "/history":
-            print_history(store, thread.id)
-            continue
-        if line == "/show" or line.startswith("/show "):
-            _, _, target = line.partition(" ")
-            target = target.strip()
-            if not target:
-                print("usage: /show <turn_id|item_id|last>")
-                continue
-            print_show(store, thread.id, target)
-            continue
-        if line == "/provider":
-            print(f"provider: {_resolve_provider_status_for_env(env)}")
-            continue
-        if line == "/model":
-            print(f"model: {_resolve_provider_model_for_env(env)}")
-            continue
-        if line.startswith("/inspect"):
-            _, _, raw_path = line.partition(" ")
-            print_inspect(cwd, raw_path or ".", max_entries=80)
-            continue
-        if line.startswith("/run "):
-            command = line.removeprefix("/run ").strip()
-            if not command:
-                print("missing command")
-                continue
-            result = await runtime.run_shell_turn(thread, command, shell)
-            if result.stdout:
-                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-            if result.stderr:
-                print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
-            if result.exit_code is not None:
-                print(f"exit_code: {result.exit_code}")
-            continue
-        if line.startswith("/"):
-            print("unknown command. type /help for commands.")
-            continue
+                line = repl_input.read(provider_status).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
 
-        message = await runtime.run_user_turn(thread, line)
-        print(message)
+            if not line:
+                continue
+            if line in {"/exit", "/quit"}:
+                break
+            if line == "/help":
+                print("/help               show commands")
+                print("/status             show session status")
+                print("/provider           show provider status")
+                print("/model              show model selection")
+                print("/configure          configure provider in session or save config")
+                print("/set [--persist|-p] KEY VALUE")
+                print("                    set session variable (and optionally persist)")
+                print("/persist            persist current session overrides to .cocoa/config.env")
+                print("/history            show turns in current thread")
+                print("/show <id|last>     show a turn or item projection")
+                print("/inspect [path]     list workspace files")
+                print("/run <command>      run shell command after approval")
+                print("/exit               quit")
+                continue
+            if line == "/configure":
+                _print_provider_config_help()
+                continue
+            if line.startswith("/configure "):
+                _, _, raw = line.partition(" ")
+                args = shlex.split(raw)
+                if not args:
+                    print("usage: /configure <openai|codex-http|codex> <args...>")
+                    continue
+                mode = args[0].lower()
+                if mode == "openai":
+                    if len(args) < 3:
+                        print("usage: /configure openai <api_key> <model> [base_url]")
+                        continue
+                    updates = {"COCOA_PROVIDER": "openai", "COCOA_OPENAI_API_KEY": args[1], "COCOA_OPENAI_MODEL": args[2]}
+                    if len(args) > 3:
+                        updates["COCOA_OPENAI_BASE_URL"] = args[3]
+                    _persist_environment(cwd, updates)
+                    overrides.clear()
+                    rebuild_runtime()
+                    env = _effective_session_environment(cwd, overrides)
+                    print("provider config persisted to .cocoa/config.env")
+                    print_provider_status()
+                    continue
+                if mode == "codex-http":
+                    updates = {"COCOA_PROVIDER": "codex-http"}
+                    if len(args) > 1:
+                        updates["COCOA_CODEX_MODEL"] = args[1]
+                        if len(args) > 2:
+                            updates["COCOA_CODEX_API_KEY"] = args[2]
+                    _persist_environment(cwd, updates)
+                    overrides.clear()
+                    rebuild_runtime()
+                    env = _effective_session_environment(cwd, overrides)
+                    print("provider config persisted to .cocoa/config.env")
+                    print_provider_status()
+                    continue
+                if mode == "clear":
+                    _persist_environment(cwd, {"COCOA_PROVIDER": ""})
+                    overrides.clear()
+                    rebuild_runtime()
+                    env = _effective_session_environment(cwd, overrides)
+                    print("provider override cleared in workspace config")
+                    continue
+                print("unknown /configure mode. use openai | codex-http | clear")
+                continue
+            if line.startswith("/set "):
+                _, _, raw = line.partition(" ")
+                try:
+                    tokens = shlex.split(raw)
+                except ValueError:
+                    print("invalid quoting in command")
+                    continue
+                persist = False
+                if not tokens:
+                    print("usage: /set [--persist|-p] KEY VALUE")
+                    continue
+                if tokens[0] in {"-p", "--persist"}:
+                    persist = True
+                    tokens = tokens[1:]
+                if not tokens:
+                    print("usage: /set [--persist|-p] KEY VALUE")
+                    continue
+                if "=" in tokens[0] and len(tokens) == 1:
+                    key, value = tokens[0].split("=", 1)
+                elif len(tokens) >= 2:
+                    key = tokens[0]
+                    value = " ".join(tokens[1:])
+                else:
+                    print("usage: /set [--persist|-p] KEY VALUE")
+                    continue
+                if not key:
+                    print("missing variable name")
+                    continue
+                set_and_reload_env(key, value)
+                env = _effective_session_environment(cwd, overrides)
+                if persist:
+                    _persist_environment(cwd, {key: value})
+                print(
+                    f"{key} {'persisted and ' if persist else ''}set"
+                )
+                print_provider_status()
+                continue
+            if line == "/persist":
+                if not overrides:
+                    print("no session overrides to persist")
+                    continue
+                _persist_environment(cwd, overrides)
+                print("session overrides persisted to .cocoa/config.env")
+                continue
+            if line == "/status":
+                print(f"thread: {thread.id}")
+                print(f"cwd: {cwd}")
+                print(f"log: {store.thread_path(thread.id)}")
+                continue
+            if line == "/history":
+                print_history(store, thread.id)
+                continue
+            if line == "/show" or line.startswith("/show "):
+                _, _, target = line.partition(" ")
+                target = target.strip()
+                if not target:
+                    print("usage: /show <turn_id|item_id|last>")
+                    continue
+                print_show(store, thread.id, target)
+                continue
+            if line == "/provider":
+                print(f"provider: {_resolve_provider_status_for_env(env)}")
+                continue
+            if line == "/model":
+                print(f"model: {_resolve_provider_model_for_env(env)}")
+                continue
+            if line.startswith("/inspect"):
+                _, _, raw_path = line.partition(" ")
+                print_inspect(cwd, raw_path or ".", max_entries=80)
+                continue
+            if line.startswith("/run "):
+                command = line.removeprefix("/run ").strip()
+                if not command:
+                    print("missing command")
+                    continue
+                result = await runtime.run_shell_turn(thread, command, shell)
+                if result.stdout:
+                    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+                if result.stderr:
+                    print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
+                if result.exit_code is not None:
+                    print(f"exit_code: {result.exit_code}")
+                continue
+            if line.startswith("/"):
+                print("unknown command. type /help for commands.")
+                continue
 
+            message = await runtime.run_user_turn(thread, line)
+            print(message)
+    finally:
+        repl_input.close()
     print(f"log: {store.thread_path(thread.id)}")
 
 
