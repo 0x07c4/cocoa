@@ -48,6 +48,20 @@ class CliFileProposalProvider:
         )
 
 
+class CliAmbiguousEditProvider:
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        return ProviderResponse(
+            message=(
+                "I can edit hello.txt.\n\n"
+                "```cocoa-proposal\n"
+                "{\"edits\":[{\"path\":\"hello.txt\","
+                "\"old\":\"hello\",\"new\":\"hi\",\"reason\":\"ambiguous\"}]}"
+                "\n```"
+            ),
+            summary="ambiguous edit",
+        )
+
+
 class CliTests(unittest.TestCase):
     def test_parser_defaults_use_repl_mode(self) -> None:
         args = build_parser().parse_args([])
@@ -376,6 +390,33 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("tmp/cocoa-demo.txt", candidates)
 
+    def test_repl_completion_includes_at_workspace_paths(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+            (tmp_path / "src").mkdir()
+            (tmp_path / "src" / "app.py").write_text("", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            candidates = _completion_candidates(
+                "explain @s",
+                "@s",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+            suggestions = _suggestion_items(
+                "explain @R",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn("@src/", candidates)
+        self.assertIn(("@README.md", "workspace context"), suggestions)
+
     def test_repl_completion_includes_pending_diff_and_reject_targets(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -427,6 +468,29 @@ class CliTests(unittest.TestCase):
         self.assertIn(f"/reject {result.proposals[0].id}", pending_output.getvalue())
         self.assertIn("--- a/hello.txt", diff_output.getvalue())
         self.assertIn("+new hello", diff_output.getvalue())
+
+    def test_pending_diff_explains_unusable_exact_edit(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "hello.txt").write_text("hello\nhello\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, CliAmbiguousEditProvider())
+            thread = runtime.start_thread(tmp_path)
+            result = asyncio.run(runtime.run_user_turn_with_result(thread, "update"))
+
+            pending = _pending_proposal_views(store, thread.id)
+            pending_output = io.StringIO()
+            with redirect_stdout(pending_output):
+                _print_pending_proposals(pending)
+            diff_output = io.StringIO()
+            with redirect_stdout(diff_output):
+                _print_pending_diff(store, thread.id, result.proposals[0].id)
+
+        self.assertIn("cannot apply:", pending_output.getvalue())
+        self.assertIn("fresh @hello.txt context", pending_output.getvalue())
+        self.assertNotIn(f"/apply {result.proposals[0].id}", pending_output.getvalue())
+        self.assertIn("cannot show diff:", diff_output.getvalue())
+        self.assertIn(f"reject: /reject {result.proposals[0].id}", diff_output.getvalue())
 
     def test_repl_suggestions_show_commands_without_tab(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -485,6 +549,16 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(line, "/exit")
         self.assertEqual(cursor, len("/exit"))
+
+    def test_apply_completion_replaces_at_reference_token(self) -> None:
+        line, cursor = _apply_completion_candidate_at_cursor(
+            "explain @RE later",
+            len("explain @RE"),
+            "@README.md",
+        )
+
+        self.assertEqual(line, "explain @README.md later")
+        self.assertEqual(cursor, len("explain @README.md"))
 
     def test_delete_previous_word_at_cursor_preserves_suffix(self) -> None:
         line, cursor = _delete_previous_word_at_cursor("hello cocoa world", len("hello cocoa"))

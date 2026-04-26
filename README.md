@@ -63,8 +63,9 @@ REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa
 在真实 TTY 里，fallback 输入框也会在输入 `/` 时直接显示 slash command 候选，
 不需要先按 Tab；上下键可移动选中项，Tab/Enter 可接受候选。
 输入行支持左右移动、Home/End、Delete、Ctrl+A/E、Ctrl+K、Ctrl+W 这些基础编辑键。
-`/show` 的 turn/item id、`/inspect` 的工作区路径、`/run` 后的 shell command
-和后续工作区路径参数同样会出现在候选里。非 TTY 或不支持 raw terminal 的环境会
+`/show` 的 turn/item id、`/inspect` 的工作区路径、普通输入里的 `@path`、
+`/run` 后的 shell command 和后续工作区路径参数同样会出现在候选里。
+非 TTY 或不支持 raw terminal 的环境会
 回退到普通 `input()`。
 
 `/provider` 会显示当前 provider，`/model` 会显示模型（未就绪时显示 `unknown`）。

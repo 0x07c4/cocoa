@@ -386,6 +386,8 @@ def _completion_candidates(
     thread_id: str,
 ) -> list[str]:
     if not line.startswith("/"):
+        if text.startswith("@"):
+            return _workspace_reference_completion_candidates(cwd, text)
         return []
 
     command, has_space, _ = line.partition(" ")
@@ -476,9 +478,9 @@ def _suggestion_items(
     thread_id: str,
     max_items: int = 24,
 ) -> list[tuple[str, str]]:
-    if not line.startswith("/"):
-        return []
     text = _completion_text(line)
+    if not line.startswith("/") and not text.startswith("@"):
+        return []
     candidates = _completion_candidates(
         line,
         text,
@@ -493,6 +495,8 @@ def _suggestion_items(
 
 
 def _completion_description(line: str, candidate: str) -> str:
+    if not line.startswith("/") and candidate.startswith("@"):
+        return "workspace context"
     command, has_space, _ = line.partition(" ")
     if not has_space:
         return _REPL_COMMAND_DESCRIPTIONS.get(candidate, "")
@@ -640,6 +644,15 @@ def _workspace_path_completion_candidates(cwd: Path, text: str) -> list[str]:
         candidate = relative + "/" if child.is_dir() else relative
         candidates.append(candidate)
     return candidates
+
+
+def _workspace_reference_completion_candidates(cwd: Path, text: str) -> list[str]:
+    if not text.startswith("@"):
+        return []
+    return [
+        f"@{candidate}"
+        for candidate in _workspace_path_completion_candidates(cwd, text[1:])
+    ]
 
 
 def _run_completion_candidates(cwd: Path, line: str, text: str) -> list[str]:
@@ -1014,10 +1027,9 @@ def _create_prompt_toolkit_session(
             complete_event: object,
         ) -> Iterator[object]:
             text_before = getattr(document, "text_before_cursor", "")
-            get_word = getattr(document, "get_word_before_cursor")
-            word = get_word(WORD=True)
+            word = _completion_text(str(text_before))
             for candidate in _completion_candidates(
-                text_before,
+                str(text_before),
                 word,
                 cwd=cwd,
                 store=store,
@@ -1293,6 +1305,18 @@ def _pending_proposal_views(store: JsonlStore, thread_id: str) -> list[ItemView]
     return pending
 
 
+def _print_file_proposal_recovery_hint(item: ItemRecord | ItemView) -> None:
+    operation = item.content.get("operation")
+    path = item.content.get("path")
+    if operation == "replace" and isinstance(path, str):
+        print(
+            f"    hint: regenerate this edit with fresh @{path} context; "
+            "the proposed old text must match the current file exactly."
+        )
+        return
+    print("    hint: reject this proposal and ask cocoa to regenerate it from current context.")
+
+
 def _print_pending_proposals(items: list[ItemView]) -> None:
     if not items:
         print("no pending proposals")
@@ -1318,7 +1342,8 @@ def _print_pending_proposals(items: list[ItemView]) -> None:
             if isinstance(reason, str) and reason:
                 print(f"    reason: {reason}")
             if isinstance(scope_error, str) and scope_error:
-                print(f"    error: {scope_error}")
+                print(f"    cannot apply: {scope_error}")
+                _print_file_proposal_recovery_hint(item)
             else:
                 print(f"    diff: /diff {item.id}")
                 print(f"    apply: /apply {item.id}")
@@ -1343,7 +1368,9 @@ def _print_pending_diff(store: JsonlStore, thread_id: str, item_id: str) -> None
         return
     scope_error = item.content.get("scope_error")
     if isinstance(scope_error, str) and scope_error:
-        print(scope_error)
+        print(f"cannot show diff: {scope_error}")
+        _print_file_proposal_recovery_hint(item)
+        print(f"reject: /reject {item.id}")
         return
     diff = item.content.get("diff")
     if not isinstance(diff, str) or not diff:
@@ -1377,12 +1404,14 @@ def _print_proposals(proposals: tuple[ItemRecord, ...]) -> None:
             if isinstance(reason, str) and reason:
                 print(f"    reason: {reason}")
             if isinstance(scope_error, str) and scope_error:
-                print(f"    error: {scope_error}")
-            diff = item.content.get("diff")
-            if isinstance(diff, str) and diff:
-                print(textwrap.indent(diff.rstrip(), "    "))
-                print(f"    diff: /diff {item.id}")
-            print(f"    apply: /apply {item.id}")
+                print(f"    cannot apply: {scope_error}")
+                _print_file_proposal_recovery_hint(item)
+            else:
+                diff = item.content.get("diff")
+                if isinstance(diff, str) and diff:
+                    print(textwrap.indent(diff.rstrip(), "    "))
+                    print(f"    diff: /diff {item.id}")
+                print(f"    apply: /apply {item.id}")
             print(f"    reject: /reject {item.id}")
 
 
@@ -1608,7 +1637,16 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 try:
                     item = runtime.apply_proposed_file_write(thread, target)
                 except ValueError as exc:
-                    print(str(exc))
+                    print(f"cannot apply: {exc}")
+                    try:
+                        view = load_thread_view(store, thread.id)
+                    except ValueError:
+                        view = None
+                    if view is not None:
+                        pending_item = view.find_item(target)
+                        if pending_item is not None and pending_item.kind == "file_write":
+                            _print_file_proposal_recovery_hint(pending_item)
+                            print(f"reject: /reject {pending_item.id}")
                     continue
                 path = item.content.get("path")
                 bytes_written = item.content.get("bytes_written")
