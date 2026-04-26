@@ -42,8 +42,11 @@ PYTHONPATH=src python -m cocoa repl
 - `/persist`（保存当前会话内所有临时变量到 `.cocoa/config.env`）
 - `/history`（查看当前 thread 的 turn projection）
 - `/show <id|last>`（查看 turn 或 item projection）
+- `/pending`（重新列出当前 thread 里未处理的 proposals）
+- `/diff <item_id>`（重新查看 pending file write 的 diff）
 - `/accept <item_id>`（执行 provider 提出的 pending command proposal）
 - `/apply <item_id>`（应用 provider 提出的 pending file write proposal）
+- `/reject <item_id>`（拒绝 pending command/file write proposal）
 
 `/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
 每一轮会自动附带一个轻量 workspace file map；输入里出现 `@path` 时，cocoa 会在
@@ -67,8 +70,10 @@ REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa
 `/provider` 会显示当前 provider，`/model` 会显示模型（未就绪时显示 `unknown`）。
 
 Provider 可以在普通文本后附一个 `cocoa-proposal` JSON block 来提出命令或文件写入建议。
-`cocoa` 会把建议记录为 pending item。命令只在用户执行 `/accept <item_id>` 并通过
-确认后才运行；文件写入会先展示 unified diff，只在用户执行 `/apply <item_id>` 后写入：
+`cocoa` 会把建议记录为 pending item。`/pending` 可以随时重新列出未处理建议，
+`/diff <item_id>` 可以重新查看文件改动，`/reject <item_id>` 会把建议明确记录为
+rejected。命令只在用户执行 `/accept <item_id>` 并通过确认后才运行；文件写入会先
+展示 unified diff，只在用户执行 `/apply <item_id>` 后写入：
 
 ````markdown
 ```cocoa-proposal

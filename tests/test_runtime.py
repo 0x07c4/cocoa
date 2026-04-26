@@ -374,6 +374,26 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(item.approval, "accepted")
             self.assertEqual(rows[-1]["payload"]["item"]["status"], "completed")
 
+    def test_runtime_rejects_pending_file_write_proposal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, FileProposalProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            turn_result = asyncio.run(runtime.run_user_turn_with_result(thread, "write file"))
+            item = runtime.reject_pending_item(thread, turn_result.proposals[0].id)
+            rows = store.read_thread(thread.id)
+
+            self.assertFalse((tmp_path / "hello.txt").exists())
+            self.assertEqual(item.status, "rejected")
+            self.assertEqual(item.approval, "rejected")
+            self.assertEqual(rows[-2]["kind"], "approval_resolved")
+            self.assertEqual(rows[-2]["payload"]["approved"], False)
+            self.assertEqual(rows[-1]["payload"]["item"]["status"], "rejected")
+
     def test_runtime_rejects_file_write_path_escape_on_apply(self) -> None:
         from tempfile import TemporaryDirectory
 

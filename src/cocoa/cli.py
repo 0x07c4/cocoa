@@ -32,14 +32,17 @@ _REPL_COMMANDS = (
     "/accept",
     "/apply",
     "/configure",
+    "/diff",
     "/exit",
     "/help",
     "/history",
     "/inspect",
     "/model",
+    "/pending",
     "/persist",
     "/provider",
     "/quit",
+    "/reject",
     "/run",
     "/set",
     "/show",
@@ -53,14 +56,17 @@ _REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
     "/accept": "run pending command",
     "/apply": "apply pending file write",
     "/configure": "configure provider",
+    "/diff": "show pending file diff",
     "/exit": "quit cocoa",
     "/help": "show commands",
     "/history": "show thread turns",
     "/inspect": "list workspace files",
     "/model": "show model",
+    "/pending": "show pending proposals",
     "/persist": "save session config",
     "/provider": "show provider",
     "/quit": "quit cocoa",
+    "/reject": "reject pending proposal",
     "/run": "run shell command",
     "/set": "set session variable",
     "/show": "show turn or item",
@@ -82,7 +88,9 @@ _COMMANDS_EXPECTING_ARGUMENTS = {
     "/accept",
     "/apply",
     "/configure",
+    "/diff",
     "/inspect",
+    "/reject",
     "/run",
     "/set",
     "/show",
@@ -405,6 +413,18 @@ def _completion_candidates(
             for candidate in _pending_file_write_completion_candidates(store, thread_id)
             if candidate.startswith(text)
         ]
+    if command == "/diff":
+        return [
+            candidate
+            for candidate in _pending_file_write_completion_candidates(store, thread_id)
+            if candidate.startswith(text)
+        ]
+    if command == "/reject":
+        return [
+            candidate
+            for candidate in _pending_proposal_completion_candidates(store, thread_id)
+            if candidate.startswith(text)
+        ]
     if command == "/inspect":
         return _workspace_path_completion_candidates(cwd, text)
     if command == "/run":
@@ -453,7 +473,7 @@ def _suggestion_items(
     cwd: Path,
     store: JsonlStore,
     thread_id: str,
-    max_items: int = 16,
+    max_items: int = 24,
 ) -> list[tuple[str, str]]:
     if not line.startswith("/"):
         return []
@@ -491,6 +511,10 @@ def _completion_description(line: str, candidate: str) -> str:
         return "pending command"
     if command == "/apply":
         return "pending file write"
+    if command == "/diff":
+        return "pending file write"
+    if command == "/reject":
+        return "pending proposal"
     if command == "/inspect":
         return "workspace path"
     if command == "/run":
@@ -556,21 +580,30 @@ def _pending_file_write_completion_candidates(store: JsonlStore, thread_id: str)
     return _pending_item_completion_candidates(store, thread_id, kind="file_write")
 
 
+def _pending_proposal_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
+    return _pending_item_completion_candidates(
+        store,
+        thread_id,
+        kind={"command", "file_write"},
+    )
+
+
 def _pending_item_completion_candidates(
     store: JsonlStore,
     thread_id: str,
     *,
-    kind: str,
+    kind: str | set[str],
 ) -> list[str]:
     try:
         view = load_thread_view(store, thread_id)
     except ValueError:
         return []
+    kinds = {kind} if isinstance(kind, str) else kind
     candidates: list[str] = []
     for turn in view.turns:
         for item in turn.items:
             if (
-                item.kind == kind
+                item.kind in kinds
                 and item.status == "pending"
                 and item.approval == "requested"
             ):
@@ -1242,6 +1275,80 @@ def _print_context_items(items: tuple[ItemRecord, ...]) -> None:
             print(f"  {item.id}: inspect {path} ({count} entries)")
 
 
+def _pending_proposal_views(store: JsonlStore, thread_id: str) -> list[ItemView]:
+    try:
+        view = load_thread_view(store, thread_id)
+    except ValueError:
+        return []
+    pending: list[ItemView] = []
+    for turn in view.turns:
+        for item in turn.items:
+            if (
+                item.kind in {"command", "file_write"}
+                and item.status == "pending"
+                and item.approval == "requested"
+            ):
+                pending.append(item)
+    return pending
+
+
+def _print_pending_proposals(items: list[ItemView]) -> None:
+    if not items:
+        print("no pending proposals")
+        return
+    print("pending proposals:")
+    for item in items:
+        if item.kind == "command":
+            command = item.content.get("command")
+            reason = item.content.get("reason")
+            print(f"  {item.id}: {textwrap.shorten(str(command), width=90)}")
+            if isinstance(reason, str) and reason:
+                print(f"    reason: {reason}")
+            print(f"    run: /accept {item.id}")
+            print(f"    reject: /reject {item.id}")
+            continue
+        if item.kind == "file_write":
+            path = item.content.get("path")
+            reason = item.content.get("reason")
+            scope_error = item.content.get("scope_error")
+            print(f"  {item.id}: write {path}")
+            if isinstance(reason, str) and reason:
+                print(f"    reason: {reason}")
+            if isinstance(scope_error, str) and scope_error:
+                print(f"    error: {scope_error}")
+            else:
+                print(f"    diff: /diff {item.id}")
+                print(f"    apply: /apply {item.id}")
+            print(f"    reject: /reject {item.id}")
+
+
+def _print_pending_diff(store: JsonlStore, thread_id: str, item_id: str) -> None:
+    try:
+        view = load_thread_view(store, thread_id)
+    except ValueError as exc:
+        print(str(exc))
+        return
+    item = view.find_item(item_id)
+    if item is None:
+        print(f"not found: {item_id}")
+        return
+    if item.kind != "file_write":
+        print(f"item is not a file write proposal: {item_id}")
+        return
+    if item.status != "pending" or item.approval != "requested":
+        print(f"file write proposal is not pending: {item_id}")
+        return
+    scope_error = item.content.get("scope_error")
+    if isinstance(scope_error, str) and scope_error:
+        print(scope_error)
+        return
+    diff = item.content.get("diff")
+    if not isinstance(diff, str) or not diff:
+        print(f"no diff available: {item_id}")
+        return
+    print(diff, end="" if diff.endswith("\n") else "\n")
+
+
 def _print_proposals(proposals: tuple[ItemRecord, ...]) -> None:
     if not proposals:
         return
@@ -1255,6 +1362,7 @@ def _print_proposals(proposals: tuple[ItemRecord, ...]) -> None:
             if isinstance(reason, str) and reason:
                 print(f"    reason: {reason}")
             print(f"    run: /accept {item.id}")
+            print(f"    reject: /reject {item.id}")
             continue
         if item.kind == ItemKind.FILE_WRITE:
             path = item.content.get("path")
@@ -1268,7 +1376,9 @@ def _print_proposals(proposals: tuple[ItemRecord, ...]) -> None:
             diff = item.content.get("diff")
             if isinstance(diff, str) and diff:
                 print(textwrap.indent(diff.rstrip(), "    "))
+                print(f"    diff: /diff {item.id}")
             print(f"    apply: /apply {item.id}")
+            print(f"    reject: /reject {item.id}")
 
 
 async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
@@ -1339,8 +1449,11 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("/persist            persist current session overrides to .cocoa/config.env")
                 print("/history            show turns in current thread")
                 print("/show <id|last>     show a turn or item projection")
+                print("/pending            show pending proposals")
+                print("/diff <item_id>     show pending file write diff")
                 print("/accept <item_id>   run a pending command proposal")
                 print("/apply <item_id>    apply a pending file write proposal")
+                print("/reject <item_id>   reject a pending proposal")
                 print("/inspect [path]     list workspace files")
                 print("/run <command>      run shell command after approval")
                 print("@path               include file or directory context in a prompt")
@@ -1444,6 +1557,9 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             if line == "/history":
                 print_history(store, thread.id)
                 continue
+            if line == "/pending":
+                _print_pending_proposals(_pending_proposal_views(store, thread.id))
+                continue
             if line == "/show" or line.startswith("/show "):
                 _, _, target = line.partition(" ")
                 target = target.strip()
@@ -1451,6 +1567,14 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print("usage: /show <turn_id|item_id|last>")
                     continue
                 print_show(store, thread.id, target)
+                continue
+            if line == "/diff" or line.startswith("/diff "):
+                _, _, target = line.partition(" ")
+                target = target.strip()
+                if not target:
+                    print("usage: /diff <item_id>")
+                    continue
+                _print_pending_diff(store, thread.id, target)
                 continue
             if line == "/accept" or line.startswith("/accept "):
                 _, _, target = line.partition(" ")
@@ -1486,6 +1610,24 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print(f"applied: {path}")
                 if isinstance(bytes_written, int):
                     print(f"bytes_written: {bytes_written}")
+                continue
+            if line == "/reject" or line.startswith("/reject "):
+                _, _, target = line.partition(" ")
+                target = target.strip()
+                if not target:
+                    print("usage: /reject <item_id>")
+                    continue
+                try:
+                    item = runtime.reject_pending_item(thread, target)
+                except ValueError as exc:
+                    print(str(exc))
+                    continue
+                path = item.content.get("path")
+                command = item.content.get("command")
+                label = path if item.kind == ItemKind.FILE_WRITE else command
+                print(f"rejected: {item.id}")
+                if isinstance(label, str) and label:
+                    print(f"target: {label}")
                 continue
             if line == "/provider":
                 print(f"provider: {_resolve_provider_status_for_env(env)}")

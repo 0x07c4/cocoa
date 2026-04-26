@@ -516,6 +516,43 @@ class AgentRuntime:
         )
         return final_item
 
+    def reject_pending_item(
+        self,
+        thread: ThreadRecord,
+        item_id: str,
+    ) -> ItemRecord:
+        pending_item = self._find_pending_proposal(thread, item_id)
+        final_item = ItemRecord(
+            id=pending_item.id,
+            thread_id=thread.id,
+            turn_id=pending_item.turn_id,
+            kind=pending_item.kind,
+            status=ItemStatus.REJECTED,
+            content=pending_item.content,
+            approval=ApprovalState.REJECTED,
+            created_at_ms=pending_item.created_at_ms,
+            completed_at_ms=now_ms(),
+        )
+        self.store.append_many(
+            [
+                event(
+                    EventKind.APPROVAL_RESOLVED,
+                    thread_id=thread.id,
+                    turn_id=pending_item.turn_id,
+                    item_id=final_item.id,
+                    payload={"approved": False},
+                ),
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread.id,
+                    turn_id=pending_item.turn_id,
+                    item_id=final_item.id,
+                    payload={"item": final_item},
+                ),
+            ]
+        )
+        return final_item
+
     def _command_proposal_item(
         self,
         thread: ThreadRecord,
@@ -766,6 +803,20 @@ class AgentRuntime:
             wrong_kind_message="item is not a file write proposal",
         )
 
+    def _find_pending_proposal(self, thread: ThreadRecord, item_id: str) -> ItemRecord:
+        item = self._find_latest_item_payload(thread, item_id)
+        if item is None:
+            raise ValueError(f"pending proposal not found: {item_id}")
+        raw_kind = item.get("kind")
+        if raw_kind not in {ItemKind.COMMAND.value, ItemKind.FILE_WRITE.value}:
+            raise ValueError(f"item is not a proposal: {item_id}")
+        return self._pending_item_from_payload(
+            thread,
+            item_id,
+            item,
+            kind=ItemKind(raw_kind),
+        )
+
     def _find_pending_item(
         self,
         thread: ThreadRecord,
@@ -775,6 +826,18 @@ class AgentRuntime:
         missing_message: str,
         wrong_kind_message: str,
     ) -> ItemRecord:
+        item = self._find_latest_item_payload(thread, item_id)
+        if item is None:
+            raise ValueError(f"{missing_message}: {item_id}")
+        if item.get("kind") != kind.value:
+            raise ValueError(f"{wrong_kind_message}: {item_id}")
+        return self._pending_item_from_payload(thread, item_id, item, kind=kind)
+
+    def _find_latest_item_payload(
+        self,
+        thread: ThreadRecord,
+        item_id: str,
+    ) -> dict[str, Any] | None:
         item: dict[str, Any] | None = None
         for row in self.store.read_thread(thread.id):
             payload = row.get("payload")
@@ -784,10 +847,16 @@ class AgentRuntime:
             if not isinstance(raw_item, dict) or raw_item.get("id") != item_id:
                 continue
             item = raw_item
-        if item is None:
-            raise ValueError(f"{missing_message}: {item_id}")
-        if item.get("kind") != kind.value:
-            raise ValueError(f"{wrong_kind_message}: {item_id}")
+        return item
+
+    def _pending_item_from_payload(
+        self,
+        thread: ThreadRecord,
+        item_id: str,
+        item: dict[str, Any],
+        *,
+        kind: ItemKind,
+    ) -> ItemRecord:
         if item.get("status") != ItemStatus.PENDING.value:
             raise ValueError(f"{kind.value} proposal is not pending: {item_id}")
         if item.get("approval") != ApprovalState.REQUESTED.value:

@@ -80,6 +80,9 @@ pending items with `approval=requested`:
 - `FILE_WRITE` proposals include a unified diff preview and require
   `/apply <item_id>`. Writes are constrained by `WorkspaceScope`, so ignored
   paths and paths outside the workspace are rejected.
+- pending proposals can be redisplayed with `/pending`, file diffs can be
+  redisplayed with `/diff <item_id>`, and either command or file proposals can be
+  explicitly closed with `/reject <item_id>`.
 
 ## Provider Boundary
 

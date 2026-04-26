@@ -18,6 +18,9 @@ from cocoa.cli import (
     _effective_environment,
     _format_repl_prompt,
     _format_suggestion_lines,
+    _pending_proposal_views,
+    _print_pending_diff,
+    _print_pending_proposals,
     _suggestion_items,
     _persist_environment,
     _parse_config_lines,
@@ -26,9 +29,23 @@ from cocoa.cli import (
     _resolve_provider_status,
     build_parser,
 )
-from cocoa.providers import StubProvider
+from cocoa.providers import ProviderRequest, ProviderResponse, StubProvider
 from cocoa.runtime import AgentRuntime
 from cocoa.store import JsonlStore
+
+
+class CliFileProposalProvider:
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        return ProviderResponse(
+            message=(
+                "I can update hello.txt.\n\n"
+                "```cocoa-proposal\n"
+                "{\"write_files\":[{\"path\":\"hello.txt\","
+                "\"content\":\"new hello\\n\",\"reason\":\"refresh greeting\"}]}"
+                "\n```"
+            ),
+            summary="file proposal",
+        )
 
 
 class CliTests(unittest.TestCase):
@@ -358,6 +375,58 @@ class CliTests(unittest.TestCase):
             )
 
         self.assertIn("tmp/cocoa-demo.txt", candidates)
+
+    def test_repl_completion_includes_pending_diff_and_reject_targets(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "hello.txt").write_text("old hello\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, CliFileProposalProvider())
+            thread = runtime.start_thread(tmp_path)
+            result = asyncio.run(runtime.run_user_turn_with_result(thread, "update"))
+            item_id = result.proposals[0].id
+
+            diff_candidates = _completion_candidates(
+                f"/diff {item_id[:8]}",
+                item_id[:8],
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+            reject_candidates = _completion_candidates(
+                f"/reject {item_id[:8]}",
+                item_id[:8],
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn(item_id, diff_candidates)
+        self.assertIn(item_id, reject_candidates)
+
+    def test_pending_helpers_show_actions_and_diff(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "hello.txt").write_text("old hello\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, CliFileProposalProvider())
+            thread = runtime.start_thread(tmp_path)
+            result = asyncio.run(runtime.run_user_turn_with_result(thread, "update"))
+
+            pending = _pending_proposal_views(store, thread.id)
+            pending_output = io.StringIO()
+            with redirect_stdout(pending_output):
+                _print_pending_proposals(pending)
+            diff_output = io.StringIO()
+            with redirect_stdout(diff_output):
+                _print_pending_diff(store, thread.id, result.proposals[0].id)
+
+        self.assertIn("pending proposals:", pending_output.getvalue())
+        self.assertIn(f"/diff {result.proposals[0].id}", pending_output.getvalue())
+        self.assertIn(f"/apply {result.proposals[0].id}", pending_output.getvalue())
+        self.assertIn(f"/reject {result.proposals[0].id}", pending_output.getvalue())
+        self.assertIn("--- a/hello.txt", diff_output.getvalue())
+        self.assertIn("+new hello", diff_output.getvalue())
 
     def test_repl_suggestions_show_commands_without_tab(self) -> None:
         with TemporaryDirectory() as tmpdir:
