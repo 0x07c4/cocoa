@@ -33,11 +33,13 @@ _REPL_COMMANDS = (
     "/apply",
     "/configure",
     "/diff",
+    "/escalate",
     "/exit",
     "/help",
     "/history",
     "/inspect",
     "/model",
+    "/mode",
     "/pending",
     "/persist",
     "/provider",
@@ -47,9 +49,12 @@ _REPL_COMMANDS = (
     "/set",
     "/show",
     "/status",
+    "/usage",
 )
 
 _CONFIGURE_MODES = ("clear", "codex-http", "openai")
+_MODEL_MODES = ("balanced", "cheap", "premium", "local")
+_MODEL_MODE_ENV = "COCOA_MODEL_MODE"
 _SET_OPTIONS = ("--persist", "-p")
 
 _REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
@@ -57,11 +62,13 @@ _REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
     "/apply": "apply pending file write",
     "/configure": "configure provider",
     "/diff": "show pending file diff",
+    "/escalate": "escalate last turn to reviewer",
     "/exit": "quit cocoa",
     "/help": "show commands",
     "/history": "show thread turns",
     "/inspect": "list workspace files",
     "/model": "show model",
+    "/mode": "show or set routing mode",
     "/pending": "show pending proposals",
     "/persist": "save session config",
     "/provider": "show provider",
@@ -71,6 +78,7 @@ _REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
     "/set": "set session variable",
     "/show": "show turn or item",
     "/status": "show session status",
+    "/usage": "show model usage",
 }
 
 _CONFIGURE_MODE_DESCRIPTIONS: Mapping[str, str] = {
@@ -89,7 +97,9 @@ _COMMANDS_EXPECTING_ARGUMENTS = {
     "/apply",
     "/configure",
     "/diff",
+    "/escalate",
     "/inspect",
+    "/mode",
     "/reject",
     "/run",
     "/set",
@@ -267,16 +277,74 @@ def _effective_session_environment(
     return env
 
 
+def _resolve_model_mode(env: Mapping[str, str]) -> str:
+    raw = env.get(_MODEL_MODE_ENV, "").strip().lower()
+    if raw in _MODEL_MODES:
+        return raw
+    return "balanced"
+
+
+def _provider_environment_for_mode(env: Mapping[str, str]) -> tuple[dict[str, str], bool]:
+    mode = _resolve_model_mode(env)
+    prefix = f"COCOA_{mode.upper()}_"
+    routed = dict(env)
+    profile_used = False
+
+    provider = env.get(f"{prefix}PROVIDER")
+    if provider:
+        routed["COCOA_PROVIDER"] = provider
+        profile_used = True
+    elif any(key.startswith(f"{prefix}OPENAI_") for key in env):
+        routed["COCOA_PROVIDER"] = "openai"
+        profile_used = True
+    elif any(key.startswith(f"{prefix}CODEX_") for key in env):
+        routed["COCOA_PROVIDER"] = "codex-http"
+        profile_used = True
+
+    key_map = {
+        "OPENAI_API_KEY": "COCOA_OPENAI_API_KEY",
+        "OPENAI_MODEL": "COCOA_OPENAI_MODEL",
+        "OPENAI_BASE_URL": "COCOA_OPENAI_BASE_URL",
+        "OPENAI_TIMEOUT_SECONDS": "COCOA_OPENAI_TIMEOUT_SECONDS",
+        "OPENAI_TEMPERATURE": "COCOA_OPENAI_TEMPERATURE",
+        "OPENAI_MAX_TOKENS": "COCOA_OPENAI_MAX_TOKENS",
+        "CODEX_API_KEY": "COCOA_CODEX_API_KEY",
+        "CODEX_MODEL": "COCOA_CODEX_MODEL",
+        "CODEX_BASE_URL": "COCOA_CODEX_BASE_URL",
+        "CODEX_HOME": "COCOA_CODEX_HOME",
+        "CODEX_TIMEOUT_SECONDS": "COCOA_CODEX_TIMEOUT_SECONDS",
+        "CODEX_TEMPERATURE": "COCOA_CODEX_TEMPERATURE",
+        "CODEX_MAX_TOKENS": "COCOA_CODEX_MAX_TOKENS",
+    }
+    for source_suffix, target_key in key_map.items():
+        source_key = f"{prefix}{source_suffix}"
+        if source_key in env:
+            routed[target_key] = env[source_key]
+            profile_used = True
+
+    generic_model = env.get(f"{prefix}MODEL")
+    if generic_model:
+        provider_name = routed.get("COCOA_PROVIDER", "").lower()
+        if provider_name in {"codex", "codex-http", "codex-responses", "openai-codex"}:
+            routed["COCOA_CODEX_MODEL"] = generic_model
+        else:
+            routed["COCOA_OPENAI_MODEL"] = generic_model
+        profile_used = True
+
+    return routed, profile_used
+
+
 def _resolve_runtime_from_env(cwd: Path, overrides: Mapping[str, str]) -> tuple[
     AgentRuntime,
     JsonlStore,
     str,
 ]:
     env = _effective_session_environment(cwd, overrides)
+    provider_env, _ = _provider_environment_for_mode(env)
     store = JsonlStore.for_workspace(cwd)
     try:
-        provider_status = _resolve_provider_status_for_env(env)
-        provider = provider_from_env(env)
+        provider_status = _resolve_provider_status_for_env(provider_env)
+        provider = provider_from_env(provider_env)
     except ProviderConfigurationError as exc:
         provider_status = f"not configured ({exc})"
         provider = StubProvider()
@@ -295,13 +363,18 @@ def resolve_cwd(raw: str) -> Path:
 def make_runtime(cwd: Path) -> tuple[AgentRuntime, JsonlStore]:
     store = JsonlStore.for_workspace(cwd)
     env = _effective_environment(cwd)
-    return AgentRuntime(store=store, provider=provider_from_env(env)), store
+    provider_env, _ = _provider_environment_for_mode(env)
+    return AgentRuntime(store=store, provider=provider_from_env(provider_env)), store
 
 
 def print_doctor(cwd: Path) -> None:
     try:
-        provider_name = provider_name_from_env(_effective_environment(cwd))
+        env = _effective_environment(cwd)
+        provider_env, profile_used = _provider_environment_for_mode(env)
+        provider_name = provider_name_from_env(provider_env)
     except ProviderConfigurationError as exc:
+        env = _effective_environment(cwd)
+        profile_used = False
         provider_name = f"not configured ({exc})"
     git_root = None
     try:
@@ -322,6 +395,7 @@ def print_doctor(cwd: Path) -> None:
     print(f"cwd: {cwd}")
     print(f"state: {cwd / '.cocoa'}")
     print(f"git_root: {git_root or '(none)'}")
+    print(f"mode: {_resolve_model_mode(env)}{' (profile)' if profile_used else ''}")
     print(f"provider: {provider_name}")
 
 
@@ -352,6 +426,59 @@ def print_history(store: JsonlStore, thread_id: str) -> None:
             f"{turn.id}\t{turn.status}\t{turn.intent}\t"
             f"{len(turn.items)} items\t{summary}"
         )
+
+
+def _print_usage(store: JsonlStore, thread_id: str) -> None:
+    rows = store.read_thread(thread_id)
+    if not rows:
+        print(f"thread not found: {thread_id}")
+        return
+    records = _usage_records(rows)
+    if not records:
+        print("no usage recorded")
+        return
+    total_input = 0
+    total_output = 0
+    print("usage:")
+    for record in records:
+        input_tokens = record.get("input_tokens")
+        output_tokens = record.get("output_tokens")
+        if isinstance(input_tokens, int):
+            total_input += input_tokens
+        if isinstance(output_tokens, int):
+            total_output += output_tokens
+        turn_id = str(record.get("turn_id") or "-")
+        mode = str(record.get("mode") or "balanced")
+        provider = str(record.get("provider") or "unknown")
+        model = record.get("model")
+        model_text = f":{model}" if isinstance(model, str) and model else ""
+        estimated = " ~" if record.get("estimated") is True else "  "
+        print(
+            f"  {turn_id}\t{mode}\t{provider}{model_text}\t"
+            f"{estimated}in={input_tokens or 0} out={output_tokens or 0}"
+        )
+    print(f"total\tin={total_input} out={total_output}")
+
+
+def _usage_records(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    routing_by_turn: dict[str, dict[str, Any]] = {}
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        kind = row.get("kind")
+        turn_id = row.get("turn_id")
+        payload = row.get("payload")
+        if not isinstance(turn_id, str) or not isinstance(payload, dict):
+            continue
+        if kind == "routing_decision":
+            routing_by_turn[turn_id] = dict(payload)
+            continue
+        if kind != "usage_recorded":
+            continue
+        record = dict(routing_by_turn.get(turn_id, {}))
+        record.update(payload)
+        record["turn_id"] = turn_id
+        records.append(record)
+    return records
 
 
 def print_show(store: JsonlStore, thread_id: str, target: str) -> None:
@@ -396,6 +523,8 @@ def _completion_candidates(
 
     if command == "/configure":
         return [mode for mode in _CONFIGURE_MODES if mode.startswith(text)]
+    if command == "/mode":
+        return [mode for mode in _MODEL_MODES if mode.startswith(text)]
     if command == "/set":
         return [option for option in _SET_OPTIONS if option.startswith(text)]
     if command == "/show":
@@ -422,6 +551,8 @@ def _completion_candidates(
             for candidate in _pending_file_write_completion_candidates(store, thread_id)
             if candidate.startswith(text)
         ]
+    if command == "/escalate":
+        return [candidate for candidate in ["last"] if candidate.startswith(text)]
     if command == "/reject":
         return [
             candidate
@@ -502,6 +633,16 @@ def _completion_description(line: str, candidate: str) -> str:
         return _REPL_COMMAND_DESCRIPTIONS.get(candidate, "")
     if command == "/configure":
         return _CONFIGURE_MODE_DESCRIPTIONS.get(candidate, "")
+    if command == "/mode":
+        if candidate == "cheap":
+            return "prefer cheap API or local models"
+        if candidate == "balanced":
+            return "cheap draft, premium when explicit"
+        if candidate == "premium":
+            return "prefer premium coding models"
+        if candidate == "local":
+            return "prefer local OpenAI-compatible models"
+        return "routing mode"
     if command == "/set":
         return _SET_OPTION_DESCRIPTIONS.get(candidate, "")
     if command == "/show":
@@ -518,6 +659,8 @@ def _completion_description(line: str, candidate: str) -> str:
         return "pending file write"
     if command == "/diff":
         return "pending file write"
+    if command == "/escalate":
+        return "last turn escalation to reviewer"
     if command == "/reject":
         return "pending proposal"
     if command == "/inspect":
@@ -1148,6 +1291,11 @@ def _resolve_provider_status_for_env(env: Mapping[str, str]) -> str:
         return f"not configured ({exc})"
 
 
+def _resolve_routed_provider_status_for_env(env: Mapping[str, str]) -> str:
+    provider_env, _ = _provider_environment_for_mode(env)
+    return _resolve_provider_status_for_env(provider_env)
+
+
 def _resolve_provider_model(env: Mapping[str, str] | None = None) -> str:
     status = _resolve_provider_status(env)
     if status == "stub" or status.startswith("not configured ("):
@@ -1159,7 +1307,7 @@ def _resolve_provider_model(env: Mapping[str, str] | None = None) -> str:
 
 
 def _resolve_provider_model_for_env(env: Mapping[str, str]) -> str:
-    status = _resolve_provider_status_for_env(env)
+    status = _resolve_routed_provider_status_for_env(env)
     if status == "stub" or status.startswith("not configured ("):
         return "unknown"
     index = status.find(":")
@@ -1169,8 +1317,38 @@ def _resolve_provider_model_for_env(env: Mapping[str, str]) -> str:
 
 
 def _is_provider_configured(env: Mapping[str, str] | None = None) -> bool:
-    status = _resolve_provider_status(env)
+    if env is None:
+        status = _resolve_provider_status()
+    else:
+        status = _resolve_routed_provider_status_for_env(env)
     return status != "stub" and not status.startswith("not configured (")
+
+
+def _routing_payload_for_env(env: Mapping[str, str]) -> dict[str, Any]:
+    provider_env, profile_used = _provider_environment_for_mode(env)
+    status = _resolve_provider_status_for_env(provider_env)
+    mode = _resolve_model_mode(env)
+    provider = status
+    model: str | None = None
+    if ":" in status:
+        provider, model = status.split(":", 1)
+    elif status in {"stub"} or status.startswith("not configured ("):
+        provider = status
+    reason = f"mode={mode}"
+    if profile_used:
+        reason += " profile override"
+    else:
+        reason += " default provider"
+    payload: dict[str, Any] = {
+        "mode": mode,
+        "provider": provider,
+        "status": status,
+        "profile": mode if profile_used else "default",
+        "reason": reason,
+    }
+    if model:
+        payload["model"] = model
+    return payload
 
 
 def _turn_preview(turn: TurnView) -> str:
@@ -1417,11 +1595,16 @@ def _print_proposals(proposals: tuple[ItemRecord, ...]) -> None:
 
 async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
     runtime, store = make_runtime(cwd)
+    env = _effective_environment(cwd)
     if thread_id is None:
         thread = runtime.start_thread(cwd, title=prompt[:80])
     else:
         thread = runtime.resume_thread(thread_id)
-    result = await runtime.run_user_turn_with_result(thread, prompt)
+    result = await runtime.run_user_turn_with_result(
+        thread,
+        prompt,
+        routing=_routing_payload_for_env(env),
+    )
     _print_context_items(result.context_items)
     print(result.message)
     _print_proposals(result.proposals)
@@ -1435,7 +1618,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
     runtime, store, provider_status = _resolve_runtime_from_env(cwd, overrides)
 
     def print_provider_status() -> None:
-        print(f"provider: {_resolve_provider_status_for_env(_effective_session_environment(cwd, overrides))}")
+        print(f"provider: {_resolve_routed_provider_status_for_env(_effective_session_environment(cwd, overrides))}")
 
     def rebuild_runtime() -> None:
         nonlocal runtime, provider_status
@@ -1477,14 +1660,17 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("/status             show session status")
                 print("/provider           show provider status")
                 print("/model              show model selection")
+                print("/mode [name]        show or set routing mode")
                 print("/configure          configure provider in session or save config")
                 print("/set [--persist|-p] KEY VALUE")
                 print("                    set session variable (and optionally persist)")
                 print("/persist            persist current session overrides to .cocoa/config.env")
                 print("/history            show turns in current thread")
+                print("/usage              show model usage in current thread")
                 print("/show <id|last>     show a turn or item projection")
                 print("/pending            show pending proposals")
                 print("/diff <item_id>     show pending file write diff")
+                print("/escalate last      escalate previous turn to reviewer/planner")
                 print("/accept <item_id>   run a pending command proposal")
                 print("/apply <item_id>    apply a pending file write proposal")
                 print("/reject <item_id>   reject a pending proposal")
@@ -1495,6 +1681,21 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 continue
             if line == "/configure":
                 _print_provider_config_help()
+                continue
+            if line == "/mode" or line.startswith("/mode "):
+                _, _, raw_mode = line.partition(" ")
+                mode = raw_mode.strip().lower()
+                if not mode:
+                    print(f"mode: {_resolve_model_mode(env)}")
+                    print("available: " + " | ".join(_MODEL_MODES))
+                    continue
+                if mode not in _MODEL_MODES:
+                    print("usage: /mode cheap|balanced|premium|local")
+                    continue
+                set_and_reload_env(_MODEL_MODE_ENV, mode)
+                env = _effective_session_environment(cwd, overrides)
+                print(f"mode: {mode}")
+                print_provider_status()
                 continue
             if line.startswith("/configure "):
                 _, _, raw = line.partition(" ")
@@ -1587,9 +1788,14 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print(f"thread: {thread.id}")
                 print(f"cwd: {cwd}")
                 print(f"log: {store.thread_path(thread.id)}")
+                print(f"mode: {_resolve_model_mode(env)}")
+                print(f"provider: {_resolve_routed_provider_status_for_env(env)}")
                 continue
             if line == "/history":
                 print_history(store, thread.id)
+                continue
+            if line == "/usage":
+                _print_usage(store, thread.id)
                 continue
             if line == "/pending":
                 _print_pending_proposals(_pending_proposal_views(store, thread.id))
@@ -1673,7 +1879,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print(f"target: {label}")
                 continue
             if line == "/provider":
-                print(f"provider: {_resolve_provider_status_for_env(env)}")
+                print(f"provider: {_resolve_routed_provider_status_for_env(env)}")
                 continue
             if line == "/model":
                 print(f"model: {_resolve_provider_model_for_env(env)}")
@@ -1681,6 +1887,27 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
             if line.startswith("/inspect"):
                 _, _, raw_path = line.partition(" ")
                 print_inspect(cwd, raw_path or ".", max_entries=80)
+                continue
+            if line.startswith("/escalate "):
+                _, _, raw_target = line.partition(" ")
+                target = raw_target.strip()
+                if target != "last":
+                    print("usage: /escalate last")
+                    continue
+                env = _effective_session_environment(cwd, overrides)
+                mode = _resolve_model_mode(env)
+                if mode != "premium":
+                    print("hint: use /mode premium for Codex review")
+                try:
+                    result = await runtime.run_escalation_turn(
+                        thread,
+                        target="last",
+                        routing=_routing_payload_for_env(env),
+                    )
+                except ValueError as exc:
+                    print(str(exc))
+                    continue
+                print(result.message)
                 continue
             if line.startswith("/run "):
                 command = line.removeprefix("/run ").strip()
@@ -1699,7 +1926,11 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("unknown command. type /help for commands.")
                 continue
 
-            turn_result = await runtime.run_user_turn_with_result(thread, line)
+            turn_result = await runtime.run_user_turn_with_result(
+                thread,
+                line,
+                routing=_routing_payload_for_env(env),
+            )
             _print_context_items(turn_result.context_items)
             print(turn_result.message)
             _print_proposals(turn_result.proposals)

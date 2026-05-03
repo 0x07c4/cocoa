@@ -25,6 +25,7 @@ from cocoa.cli import (
     _persist_environment,
     _parse_config_lines,
     _is_provider_configured,
+    _resolve_model_mode,
     _resolve_provider_model,
     _resolve_provider_status,
     build_parser,
@@ -126,6 +127,12 @@ class CliTests(unittest.TestCase):
             model = _resolve_provider_model()
         self.assertEqual(model, "codex-mini")
 
+    def test_model_mode_defaults_to_balanced(self) -> None:
+        self.assertEqual(_resolve_model_mode({}), "balanced")
+
+    def test_model_mode_reads_valid_env(self) -> None:
+        self.assertEqual(_resolve_model_mode({"COCOA_MODEL_MODE": "cheap"}), "cheap")
+
     def test_parse_config_lines_handles_comments_quotes_and_spaces(self) -> None:
         parsed = _parse_config_lines(
             "\n".join(
@@ -215,6 +222,25 @@ class CliTests(unittest.TestCase):
         self.assertIn("COCOA_PROVIDER set", logs)
         self.assertIn("provider: openai-compatible:gpt-5", logs)
 
+    def test_repl_mode_sets_session_mode(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        "/mode",
+                        "/mode cheap",
+                        "/status",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=Path(tmpdir)))
+        logs = output.getvalue()
+        self.assertIn("mode: balanced", logs)
+        self.assertIn("mode: cheap", logs)
+
     def test_repl_set_persist_in_session(self) -> None:
         with TemporaryDirectory() as tmpdir:
             with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
@@ -291,6 +317,26 @@ class CliTests(unittest.TestCase):
         self.assertIn("user_message", logs)
         self.assertIn("agent_message", logs)
         self.assertIn("Provider is not configured yet.", logs)
+
+    def test_repl_usage_prints_recorded_turn_usage(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        "hello usage",
+                        "/usage",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=Path(tmpdir)))
+        logs = output.getvalue()
+        self.assertIn("usage:", logs)
+        self.assertIn("balanced", logs)
+        self.assertIn("stub", logs)
+        self.assertIn("total\tin=", logs)
 
     def test_repl_completion_includes_slash_commands(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -594,6 +640,74 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(prompt, "+-- cocoa  stub  thr_test\n+> ")
 
+
+    def test_repl_completion_includes_escalate_command(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            candidates = _completion_candidates(
+                "/esc",
+                "/esc",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn("/escalate", candidates)
+
+    def test_repl_suggestions_include_escalate(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            suggestions = _suggestion_items(
+                "/",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn(("/escalate", "escalate last turn to reviewer"), suggestions)
+
+    def test_repl_escalate_last_hints_when_not_premium(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        "hello escalation hint",
+                        "/escalate last",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=tmp_path))
+        logs = output.getvalue()
+        self.assertIn("hint: use /mode premium for Codex review", logs)
+
+    def test_repl_escalate_last_prints_error_on_empty_thread(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        "/escalate last",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=tmp_path))
+        logs = output.getvalue()
+        self.assertIn("no previous turn to escalate", logs)
 
     def test_persist_environment_overwrites_keys(self) -> None:
         with TemporaryDirectory() as tmpdir:

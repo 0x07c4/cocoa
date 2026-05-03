@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from difflib import unified_diff
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .models import (
     ApprovalState,
@@ -21,6 +21,7 @@ from .models import (
     now_ms,
 )
 from .providers import ProviderAdapter, ProviderRequest
+from .projection import TurnView, load_thread_view
 from .proposals import CommandProposal, FileEditProposal, FileWriteProposal, parse_proposals
 from .store import JsonlStore
 from .tools import CommandResult, ShellTool
@@ -32,6 +33,7 @@ class UserTurnResult:
     message: str
     context_items: tuple[ItemRecord, ...] = ()
     proposals: tuple[ItemRecord, ...] = ()
+    usage: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,8 @@ class AgentRuntime:
         self,
         thread: ThreadRecord,
         prompt: str,
+        *,
+        routing: Mapping[str, Any] | None = None,
     ) -> UserTurnResult:
         turn = self.start_turn(thread, intent="conversation", user_text=prompt)
         context = self._build_thread_context(thread, skip_turn_id=turn.id)
@@ -171,17 +175,28 @@ class AgentRuntime:
                 )
                 for item in workspace_context.items
             )
-        try:
-            response = await self.provider.complete(
-                ProviderRequest(
-                    thread_id=thread.id,
-                    turn_id=turn.id,
-                    prompt=prompt,
-                    cwd=thread.cwd,
-                    thread_context=context,
-                    workspace_context=workspace_context.text,
-                )
+        provider_request = ProviderRequest(
+            thread_id=thread.id,
+            turn_id=turn.id,
+            prompt=prompt,
+            cwd=thread.cwd,
+            thread_context=context,
+            workspace_context=workspace_context.text,
+        )
+        routing_payload = self._routing_payload(
+            routing,
+            request=provider_request,
+        )
+        self.store.append(
+            event(
+                EventKind.ROUTING_DECISION,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                payload=routing_payload,
             )
+        )
+        try:
+            response = await self.provider.complete(provider_request)
         except Exception as exc:
             self.store.append(
                 event(
@@ -204,6 +219,14 @@ class AgentRuntime:
         if not message:
             message = response.message.strip()
 
+        usage_payload = self._usage_payload(
+            routing_payload,
+            request=provider_request,
+            response_message=response.message,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+        )
+
         agent_item = ItemRecord(
             id=new_id("item"),
             thread_id=thread.id,
@@ -214,6 +237,12 @@ class AgentRuntime:
             completed_at_ms=now_ms(),
         )
         events = [
+            event(
+                EventKind.USAGE_RECORDED,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                payload=usage_payload,
+            ),
             event(
                 EventKind.ITEM_COMPLETED,
                 thread_id=thread.id,
@@ -257,6 +286,128 @@ class AgentRuntime:
             message=message,
             context_items=workspace_context.items,
             proposals=proposal_items,
+            usage=usage_payload,
+        )
+
+    async def run_escalation_turn(
+        self,
+        thread: ThreadRecord,
+        target: str = "last",
+        *,
+        routing: Mapping[str, Any] | None = None,
+    ) -> UserTurnResult:
+        if target != "last":
+            raise ValueError(f"unsupported escalation target: {target}")
+
+        user_text = f"/escalate {target}"
+        turn = self.start_turn(thread, intent="escalation", user_text=user_text)
+
+        view = load_thread_view(self.store, thread.id)
+        target_turn: TurnView | None = None
+        for t in reversed(view.turns):
+            if t.id == turn.id or t.intent == "escalation":
+                continue
+            if t.items:
+                target_turn = t
+                break
+
+        if target_turn is None:
+            self.complete_turn(
+                thread,
+                turn,
+                status=TurnStatus.FAILED,
+                summary="no previous turn to escalate",
+            )
+            raise ValueError("no previous turn to escalate")
+
+        escalation_prompt = self._build_escalation_prompt(target_turn)
+        context = self._build_thread_context(thread, skip_turn_id=turn.id)
+
+        provider_request = ProviderRequest(
+            thread_id=thread.id,
+            turn_id=turn.id,
+            prompt=escalation_prompt,
+            cwd=thread.cwd,
+            thread_context=context,
+            workspace_context=None,
+        )
+        base_routing = self._routing_payload(routing, request=provider_request)
+        routing_payload = dict(base_routing)
+        routing_payload["role"] = "review"
+        routing_payload["escalation"] = True
+        routing_payload["target_turn_id"] = target_turn.id
+
+        self.store.append(
+            event(
+                EventKind.ROUTING_DECISION,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                payload=routing_payload,
+            )
+        )
+        try:
+            response = await self.provider.complete(provider_request)
+        except Exception as exc:
+            self.store.append(
+                event(
+                    EventKind.ERROR,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    payload={"message": str(exc), "type": type(exc).__name__},
+                )
+            )
+            self.complete_turn(
+                thread,
+                turn,
+                status=TurnStatus.FAILED,
+                summary=f"provider error: {type(exc).__name__}",
+            )
+            raise
+
+        message = response.message.strip()
+
+        usage_payload = self._usage_payload(
+            routing_payload,
+            request=provider_request,
+            response_message=message,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+        )
+        agent_item = ItemRecord(
+            id=new_id("item"),
+            thread_id=thread.id,
+            turn_id=turn.id,
+            kind=ItemKind.AGENT_MESSAGE,
+            status=ItemStatus.COMPLETED,
+            content={"text": message},
+            completed_at_ms=now_ms(),
+        )
+        self.store.append_many(
+            [
+                event(
+                    EventKind.USAGE_RECORDED,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    payload=usage_payload,
+                ),
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread.id,
+                    turn_id=turn.id,
+                    item_id=agent_item.id,
+                    payload={"item": agent_item},
+                ),
+            ]
+        )
+        self.complete_turn(
+            thread,
+            turn,
+            status=TurnStatus.COMPLETED,
+            summary=response.summary,
+        )
+        return UserTurnResult(
+            message=message,
+            usage=usage_payload,
         )
 
     async def run_shell_turn(
@@ -720,6 +871,75 @@ class AgentRuntime:
             approval=ApprovalState.REQUESTED,
         )
 
+    def _routing_payload(
+        self,
+        routing: Mapping[str, Any] | None,
+        *,
+        request: ProviderRequest,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if routing is not None:
+            payload.update({str(key): value for key, value in routing.items()})
+        payload.setdefault("mode", "balanced")
+        payload.setdefault("provider", self.provider.__class__.__name__)
+        model = self._provider_model_name()
+        if model is not None:
+            payload.setdefault("model", model)
+        payload.setdefault("reason", "runtime provider selection")
+        payload["estimated_input_tokens"] = self._estimate_request_tokens(request)
+        return payload
+
+    def _usage_payload(
+        self,
+        routing_payload: Mapping[str, Any],
+        *,
+        request: ProviderRequest,
+        response_message: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+    ) -> dict[str, Any]:
+        estimated_input_tokens = self._estimate_request_tokens(request)
+        estimated_output_tokens = self._estimate_tokens(response_message)
+        actual_input = input_tokens if isinstance(input_tokens, int) else None
+        actual_output = output_tokens if isinstance(output_tokens, int) else None
+        final_input = actual_input if actual_input is not None else estimated_input_tokens
+        final_output = actual_output if actual_output is not None else estimated_output_tokens
+        payload: dict[str, Any] = {
+            "mode": routing_payload.get("mode", "balanced"),
+            "provider": routing_payload.get("provider", self.provider.__class__.__name__),
+            "model": routing_payload.get("model"),
+            "input_tokens": final_input,
+            "output_tokens": final_output,
+            "estimated": actual_input is None or actual_output is None,
+            "estimated_input_tokens": estimated_input_tokens,
+            "estimated_output_tokens": estimated_output_tokens,
+        }
+        role = routing_payload.get("role")
+        if isinstance(role, str) and role:
+            payload["role"] = role
+        reason = routing_payload.get("reason")
+        if isinstance(reason, str) and reason:
+            payload["reason"] = reason
+        return payload
+
+    def _provider_model_name(self) -> str | None:
+        config = getattr(self.provider, "config", None)
+        model = getattr(config, "model", None)
+        return model if isinstance(model, str) and model else None
+
+    def _estimate_request_tokens(self, request: ProviderRequest) -> int:
+        parts = [
+            request.prompt,
+            request.thread_context or "",
+            request.workspace_context or "",
+        ]
+        return self._estimate_tokens("\n\n".join(part for part in parts if part))
+
+    def _estimate_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        return max(1, (len(text) + 3) // 4)
+
     def _build_workspace_context(
         self,
         thread: ThreadRecord,
@@ -1152,6 +1372,129 @@ class AgentRuntime:
                 + context[-_MAX_THREAD_CONTEXT_CHARS:]
             )
         return context
+
+    def _build_escalation_prompt(self, turn: TurnView) -> str:
+        sections: list[str] = [
+            "You are acting as a reviewer/planner.",
+            "Review the following turn from a coding session.",
+            "",
+            f"Target Turn ID: {turn.id}",
+            f"Intent: {turn.intent}",
+            f"Status: {turn.status}",
+            "",
+        ]
+
+        user_message = ""
+        assistant_message = ""
+        pending_proposals: list[str] = []
+        command_results: list[str] = []
+        applied_changes: list[str] = []
+
+        for item in turn.items:
+            if item.kind == "user_message":
+                text = item.content.get("text", "")
+                if isinstance(text, str):
+                    user_message = text
+            elif item.kind == "agent_message":
+                text = item.content.get("text", "")
+                if isinstance(text, str):
+                    assistant_message = text
+            elif item.kind == "command":
+                lines: list[str] = []
+                command = item.content.get("command", "")
+                item_status = item.status
+                item_approval = item.approval
+                is_pending = item_status == "pending" and item_approval == "requested"
+
+                if is_pending:
+                    lines.append(f"Command proposal: {command}")
+                    reason = item.content.get("reason")
+                    if isinstance(reason, str) and reason:
+                        lines.append(f"reason: {reason}")
+                    pending_proposals.append("\n".join(lines))
+                else:
+                    lines.append(f"Command ({item_status}, approval={item_approval}): {command}")
+                    exit_code = item.content.get("exit_code")
+                    if exit_code is not None:
+                        lines.append(f"exit_code: {exit_code}")
+                    stdout = item.content.get("stdout")
+                    stderr = item.content.get("stderr")
+                    if isinstance(stdout, str) and stdout:
+                        lines.append("stdout:")
+                        lines.append(self._clip_context_field(stdout))
+                    if isinstance(stderr, str) and stderr:
+                        lines.append("stderr:")
+                        lines.append(self._clip_context_field(stderr))
+                    error = item.content.get("error")
+                    if isinstance(error, str) and error:
+                        lines.append(f"error: {self._clip_context_field(error)}")
+                    command_results.append("\n".join(lines))
+            elif item.kind == "file_write":
+                lines: list[str] = []
+                path = item.content.get("path", "")
+                item_status = item.status
+                item_approval = item.approval
+                operation = item.content.get("operation", "write")
+                is_pending = item_status == "pending" and item_approval == "requested"
+
+                if is_pending:
+                    action = "File edit" if operation == "replace" else "File write"
+                    lines.append(f"{action} proposal: {path}")
+                    reason = item.content.get("reason")
+                    if isinstance(reason, str) and reason:
+                        lines.append(f"reason: {reason}")
+                    diff = item.content.get("diff")
+                    if isinstance(diff, str) and diff:
+                        lines.append(f"diff:\n{self._clip_context_field(diff)}")
+                    scope_error = item.content.get("scope_error")
+                    if isinstance(scope_error, str) and scope_error:
+                        lines.append(f"scope_error: {scope_error}")
+                    pending_proposals.append("\n".join(lines))
+                else:
+                    action = "File edit" if operation == "replace" else "File write"
+                    lines.append(f"{action} ({item_status}, approval={item_approval}): {path}")
+                    bytes_written = item.content.get("bytes_written")
+                    if isinstance(bytes_written, int):
+                        lines.append(f"bytes_written: {bytes_written}")
+                    scope_error = item.content.get("scope_error")
+                    if isinstance(scope_error, str) and scope_error:
+                        lines.append(f"scope_error: {scope_error}")
+                    applied_changes.append("\n".join(lines))
+
+        if user_message:
+            sections.append("User Message:")
+            sections.append(user_message)
+            sections.append("")
+
+        if assistant_message:
+            sections.append("Assistant Message:")
+            sections.append(assistant_message)
+            sections.append("")
+
+        if pending_proposals:
+            sections.append("Pending Proposals:")
+            sections.extend(pending_proposals)
+            sections.append("")
+
+        if command_results:
+            sections.append("Command Results:")
+            sections.extend(command_results)
+            sections.append("")
+
+        if applied_changes:
+            sections.append("Applied Changes:")
+            sections.extend(applied_changes)
+            sections.append("")
+
+        sections.append("Your task:")
+        sections.append("- Review and analyze the work done in this turn")
+        sections.append("- Identify any issues, risks, or improvements")
+        sections.append("- Stay in plan/review mode")
+        sections.append("- Do not implement, rewrite, run commands, or emit cocoa-proposal blocks")
+        sections.append("- Lead with findings")
+        sections.append('- End with either "ready" or "needs-fix"')
+
+        return "\n".join(sections)
 
     def _context_lines_for_item(self, item: dict[str, Any]) -> list[str]:
         kind = item.get("kind")

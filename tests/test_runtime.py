@@ -110,10 +110,44 @@ class RuntimeTests(unittest.TestCase):
                     "thread_started",
                     "turn_started",
                     "item_completed",
+                    "routing_decision",
+                    "usage_recorded",
                     "item_completed",
                     "turn_completed",
                 ],
             )
+
+    def test_runtime_records_routing_and_usage_events(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, CapturingProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(
+                runtime.run_user_turn_with_result(
+                    thread,
+                    "hello usage",
+                    routing={
+                        "mode": "cheap",
+                        "provider": "openai-compatible",
+                        "model": "deepseek-v4",
+                        "reason": "test route",
+                    },
+                )
+            )
+            rows = store.read_thread(thread.id)
+
+            routing = next(row for row in rows if row["kind"] == "routing_decision")
+            usage = next(row for row in rows if row["kind"] == "usage_recorded")
+            self.assertEqual(routing["payload"]["mode"], "cheap")
+            self.assertEqual(routing["payload"]["model"], "deepseek-v4")
+            self.assertEqual(usage["payload"]["provider"], "openai-compatible")
+            self.assertGreater(usage["payload"]["input_tokens"], 0)
+            self.assertGreater(usage["payload"]["output_tokens"], 0)
+            self.assertTrue(result.usage)
 
     def test_runtime_runs_approved_shell_turn(self) -> None:
         from tempfile import TemporaryDirectory
@@ -611,6 +645,279 @@ class RuntimeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "escapes workspace"):
                 runtime.apply_proposed_file_write(thread, turn_result.proposals[0].id)
+
+    def test_escalation_raises_error_with_no_prior_turn(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            with self.assertRaisesRegex(ValueError, "no previous turn to escalate"):
+                asyncio.run(runtime.run_escalation_turn(thread, target="last"))
+
+    def test_escalation_calls_provider_with_target_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "hello world"))
+
+            result = asyncio.run(runtime.run_escalation_turn(thread, target="last"))
+
+            self.assertIn("hello world", result.message)
+            self.assertEqual(len(provider.requests), 2)
+            request = provider.requests[-1]
+            self.assertIsNone(request.workspace_context)
+            self.assertIn("Target Turn ID", request.prompt)
+            self.assertIn("hello world", request.prompt)
+            self.assertIn("ready", request.prompt.lower())
+
+    def test_escalation_records_routing_and_usage_metadata(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, CapturingProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "test route"))
+            result = asyncio.run(
+                runtime.run_escalation_turn(
+                    thread,
+                    target="last",
+                    routing={
+                        "mode": "premium",
+                        "provider": "codex-http",
+                        "model": "codex-review",
+                        "reason": "test escalation",
+                    },
+                )
+            )
+
+            rows = store.read_thread(thread.id)
+            routing = next(row for row in rows if row["kind"] == "routing_decision"
+                           and row["turn_id"] != rows[1]["turn_id"])
+            usage = next(row for row in rows if row["kind"] == "usage_recorded"
+                         and row["turn_id"] == routing["turn_id"])
+
+            self.assertEqual(routing["payload"]["role"], "review")
+            self.assertTrue(routing["payload"]["escalation"])
+            self.assertIn("target_turn_id", routing["payload"])
+            self.assertIn(result.usage, [usage["payload"]])
+
+    def test_escalation_skips_prior_escalation_turns(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "first turn"))
+            asyncio.run(runtime.run_escalation_turn(thread, target="last"))
+            provider.requests.clear()
+
+            result = asyncio.run(runtime.run_user_turn(thread, "second turn"))
+            provider.requests.clear()
+
+            result = asyncio.run(runtime.run_escalation_turn(thread, target="last"))
+
+            self.assertIn("second turn", result.message)
+
+    def test_escalation_does_not_parse_proposals(self) -> None:
+        from tempfile import TemporaryDirectory
+        import json
+
+        class ProposalInResponseProvider:
+            async def complete(self, request):
+                return ProviderResponse(
+                    message="review ok\n```cocoa-proposal\n"
+                    "{\"commands\":[{\"command\":\"echo bad\",\"reason\":\"should not parse\"}]}"
+                    "\n```",
+                    summary="review with proposal",
+                )
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, CapturingProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "write proposal"))
+            store2 = JsonlStore.for_workspace(tmp_path)
+            runtime2 = AgentRuntime(store2, ProposalInResponseProvider())
+
+            result = asyncio.run(
+                runtime2.run_escalation_turn(thread, target="last")
+            )
+
+            self.assertIn("review ok", result.message)
+            self.assertFalse(result.proposals)
+
+    def test_escalation_fails_for_unsupported_target(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            with self.assertRaisesRegex(ValueError, "unsupported escalation target"):
+                asyncio.run(runtime.run_escalation_turn(thread, target="all"))
+
+    def test_escalation_includes_command_results_in_prompt(self) -> None:
+        from tempfile import TemporaryDirectory
+        import shlex
+        import sys
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+            shell = ShellTool(AlwaysApprovePrompter())
+            command = f"{shlex.quote(sys.executable)} -c \"print('cmd_out')\""
+
+            asyncio.run(runtime.run_shell_turn(thread, command, shell))
+
+            provider = CapturingProvider()
+            store2 = JsonlStore.for_workspace(tmp_path)
+            runtime2 = AgentRuntime(store2, provider)
+
+            result = asyncio.run(
+                runtime2.run_escalation_turn(thread, target="last")
+            )
+
+            self.assertIn("cmd_out", result.message)
+            request = provider.requests[-1]
+            self.assertIn("Command ", request.prompt)
+            self.assertIn("cmd_out", request.prompt)
+            self.assertIn("exit_code: 0", request.prompt)
+
+    def test_escalation_includes_pending_proposals_in_prompt(self) -> None:
+        from tempfile import TemporaryDirectory
+        import json
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, FileProposalProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn_with_result(thread, "write file"))
+            provider = CapturingProvider()
+            store2 = JsonlStore.for_workspace(tmp_path)
+            runtime2 = AgentRuntime(store2, provider)
+
+            result = asyncio.run(
+                runtime2.run_escalation_turn(thread, target="last")
+            )
+
+            request = provider.requests[-1]
+            self.assertIn("File write proposal:", request.prompt)
+            self.assertIn("hello.txt", request.prompt)
+            self.assertIn("create a demo file", request.prompt)
+
+    def test_escalation_skips_turn_with_no_items(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        class EmptyTurnCapturingProvider:
+            def __init__(self):
+                self.requests = []
+
+            async def complete(self, request):
+                self.requests.append(request)
+                return ProviderResponse(
+                    message=f"echo:{request.prompt}",
+                    summary="captured",
+                )
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = EmptyTurnCapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "real turn"))
+            provider.requests.clear()
+
+            result = asyncio.run(
+                runtime.run_escalation_turn(thread, target="last")
+            )
+
+            self.assertIn("real turn", result.message)
+
+    def test_escalation_reuses_thread_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "first turn"))
+            asyncio.run(runtime.run_user_turn(thread, "second turn"))
+            provider.requests.clear()
+
+            asyncio.run(runtime.run_escalation_turn(thread, target="last"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.thread_context)
+            self.assertIn("User: first turn", request.thread_context)
+
+    def test_escalation_does_not_include_workspace_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "what is here?"))
+            provider.requests.clear()
+
+            asyncio.run(runtime.run_escalation_turn(thread, target="last"))
+
+            request = provider.requests[-1]
+            self.assertIsNone(request.workspace_context)
+
+    def test_escalation_can_escalate_same_turn_multiple_times(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "only turn"))
+            asyncio.run(runtime.run_escalation_turn(thread, target="last"))
+            provider.requests.clear()
+
+            result = asyncio.run(
+                runtime.run_escalation_turn(thread, target="last")
+            )
+
+            self.assertIn("only turn", result.message)
 
     def test_runtime_rejects_ignored_file_write_path_on_apply(self) -> None:
         from tempfile import TemporaryDirectory
