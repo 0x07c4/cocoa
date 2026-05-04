@@ -150,18 +150,19 @@ class CliTests(unittest.TestCase):
 
     def test_effective_environment_reads_workspace_config(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            cfg_path = Path(tmpdir) / ".cocoa" / "config.env"
-            cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            cfg_path.write_text(
-                "\n".join(
-                    [
-                        "COCOA_PROVIDER=codex-http",
-                        "COCOA_CODEX_API_KEY=workspace-token",
-                        "COCOA_CODEX_MODEL=codex-workspace",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            from cocoa import config as cocoa_config
+            cfg_dir = Path(tmpdir) / ".cocoa"
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            data = {
+                "provider_used": "codex-http",
+                "provider": {
+                    "codex": {
+                        "api_key": "workspace-token",
+                        "model": "codex-workspace",
+                    },
+                },
+            }
+            cocoa_config.save_workspace_config(Path(tmpdir), data)
 
             with mock.patch.dict(
                 os.environ,
@@ -194,15 +195,15 @@ class CliTests(unittest.TestCase):
                     output = io.StringIO()
                     with redirect_stdout(output):
                         asyncio.run(run_repl(cwd=Path(tmpdir)))
-                cfg_path = Path(tmpdir) / ".cocoa" / "config.env"
+                cfg_path = Path(tmpdir) / ".cocoa" / "cocoa.toml"
                 self.assertTrue(cfg_path.exists())
                 cfg = cfg_path.read_text(encoding="utf-8")
-                self.assertIn("COCOA_PROVIDER=openai", cfg)
-                self.assertIn("COCOA_OPENAI_API_KEY=sk-test-key", cfg)
-                self.assertIn("COCOA_OPENAI_MODEL=gpt-5", cfg)
+                self.assertIn('provider_used = "openai"', cfg)
+                self.assertIn('api_key = "sk-test-key"', cfg)
+                self.assertIn('model = "gpt-5"', cfg)
 
         logs = output.getvalue()
-        self.assertIn("provider config persisted to .cocoa/config.env", logs)
+        self.assertIn("provider config persisted to .cocoa/cocoa.toml", logs)
         self.assertIn("provider: openai-compatible:gpt-5", logs)
 
     def test_repl_set_updates_provider_in_session(self) -> None:
@@ -256,12 +257,12 @@ class CliTests(unittest.TestCase):
                     output = io.StringIO()
                     with redirect_stdout(output):
                         asyncio.run(run_repl(cwd=Path(tmpdir)))
-            cfg_path = Path(tmpdir) / ".cocoa" / "config.env"
+            cfg_path = Path(tmpdir) / ".cocoa" / "cocoa.toml"
             self.assertTrue(cfg_path.exists())
             cfg = cfg_path.read_text(encoding="utf-8")
-            self.assertIn("COCOA_PROVIDER=openai", cfg)
-            self.assertIn("COCOA_OPENAI_API_KEY=sk-session-persist", cfg)
-            self.assertIn("COCOA_OPENAI_MODEL=gpt-5", cfg)
+            self.assertIn('provider_used = "openai"', cfg)
+            self.assertIn('api_key = "sk-session-persist"', cfg)
+            self.assertIn('model = "gpt-5"', cfg)
 
         logs = output.getvalue()
         self.assertIn("COCOA_PROVIDER persisted and set", logs)
@@ -285,14 +286,14 @@ class CliTests(unittest.TestCase):
                     output = io.StringIO()
                     with redirect_stdout(output):
                         asyncio.run(run_repl(cwd=Path(tmpdir)))
-            cfg_path = Path(tmpdir) / ".cocoa" / "config.env"
+            cfg_path = Path(tmpdir) / ".cocoa" / "cocoa.toml"
             self.assertTrue(cfg_path.exists())
             cfg = cfg_path.read_text(encoding="utf-8")
-            self.assertIn("COCOA_PROVIDER=openai", cfg)
-            self.assertIn("COCOA_OPENAI_API_KEY=sk-session-persist2", cfg)
-            self.assertIn("COCOA_OPENAI_MODEL=gpt-4.1", cfg)
+            self.assertIn('provider_used = "openai"', cfg)
+            self.assertIn('api_key = "sk-session-persist2"', cfg)
+            self.assertIn('model = "gpt-4.1"', cfg)
         logs = output.getvalue()
-        self.assertIn("session overrides persisted to .cocoa/config.env", logs)
+        self.assertIn("session overrides persisted to .cocoa/cocoa.toml", logs)
         self.assertIn("provider: openai-compatible:gpt-4.1", logs)
 
     def test_repl_history_and_show_last_use_projection(self) -> None:
@@ -711,14 +712,17 @@ class CliTests(unittest.TestCase):
 
     def test_persist_environment_overwrites_keys(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            cfg_path = Path(tmpdir) / ".cocoa" / "config.env"
+            from cocoa import config as cocoa_config
+            cfg_path = Path(tmpdir) / ".cocoa" / "cocoa.toml"
             cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            cfg_path.write_text("COCOA_PROVIDER=codex-http\nCOCOA_CODEX_MODEL=old\n", encoding="utf-8")
+            cocoa_config.save_workspace_config(Path(tmpdir), {
+                "provider_used": "codex-http",
+                "provider": {"codex": {"model": "old"}},
+            })
             _persist_environment(Path(tmpdir), {"COCOA_PROVIDER": "openai", "COCOA_OPENAI_MODEL": "gpt-5-mini"})
             cfg = cfg_path.read_text(encoding="utf-8")
-        self.assertIn("COCOA_PROVIDER=openai", cfg)
-        self.assertIn("COCOA_OPENAI_MODEL=gpt-5-mini", cfg)
-        self.assertIn("COCOA_CODEX_MODEL=old", cfg)
+        self.assertIn('provider_used = "openai"', cfg)
+        self.assertIn('model = "gpt-5-mini"', cfg)
 
 if __name__ == "__main__":
     unittest.main()

@@ -214,6 +214,8 @@ class ProviderRequest:
 class ProviderResponse:
     message: str
     summary: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class ProviderError(RuntimeError):
@@ -435,8 +437,11 @@ class OpenAICompatibleProvider:
         except json.JSONDecodeError as exc:
             raise ProviderResponseError("provider returned invalid JSON") from exc
 
+        input_tokens, output_tokens = self._extract_usage(data)
         return ProviderResponse(
             message=self._extract_message(data),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
     def _format_user_prompt(self, request: ProviderRequest) -> str:
@@ -491,6 +496,21 @@ class OpenAICompatibleProvider:
                 if isinstance(message, str):
                     return message
         return body[:500] or "(empty error body)"
+
+    def _extract_usage(self, data: dict[str, Any]) -> tuple[int | None, int | None]:
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return None, None
+        input_tokens = usage.get("prompt_tokens")
+        if not isinstance(input_tokens, int):
+            input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("completion_tokens")
+        if not isinstance(output_tokens, int):
+            output_tokens = usage.get("output_tokens")
+        return (
+            input_tokens if isinstance(input_tokens, int) else None,
+            output_tokens if isinstance(output_tokens, int) else None,
+        )
 
 
 class CodexResponsesProvider:

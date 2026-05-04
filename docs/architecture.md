@@ -104,3 +104,31 @@ Expected provider adapters:
 - external CLI bridge
 
 The runtime should keep working if the provider changes.
+
+## Cost-Aware Routing Boundary
+
+Provider selection is also runtime policy, not UI state and not provider state.
+The long-term shape is:
+
+- provider profiles describe access: endpoint, auth source, timeout, and default
+  model
+- model roles describe intent: architect, reviewer, implementer, summarizer,
+  private, or draft
+- routing decisions select a role, provider, and model for a turn
+- usage records attach token and estimated-cost data to the turn
+
+This keeps cost control tied to the same event trail as approvals and side
+effects. A cheap model can draft or summarize, then a premium model can review
+the prior item as structured context. The UI should project that decision, but
+the append-only runtime log should remain the source of truth.
+
+The first policy should favor explicit user modes over hidden automation:
+
+- `cheap`: prefer inexpensive API or local models
+- `balanced`: Codex plans, cheap models draft, Codex reviews
+- `premium`: prefer ChatGPT/Codex-class models for planning and review
+- `local`: keep all model calls local
+
+See [cost-aware-runtime.md](cost-aware-runtime.md) for the product strategy and
+implementation phases, and [vibe-coding-workflow.md](vibe-coding-workflow.md)
+for the intended Codex + DeepSeek + local model collaboration loop.

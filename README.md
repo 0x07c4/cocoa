@@ -2,6 +2,12 @@
 
 `cocoa` is a terminal-native agentic coding system.
 
+Its current direction is a cost-aware, provider-agnostic agent runtime for
+human-controlled vibe coding. It is not trying to become another full OpenCode
+or Codex CLI clone. The CLI is the first projection of a runtime that owns
+events, approvals, replay, provider routing, and workspace side-effect
+boundaries.
+
 The first implementation is Python-first:
 
 - the package is typed Python and ships a `py.typed` marker
@@ -10,7 +16,12 @@ The first implementation is Python-first:
 - providers are adapters, not the product protocol
 - local state is append-only JSONL for easy replay and debugging
 
-Rust or C/C++ can be added later for native helpers such as PTY handling,
+See [docs/cost-aware-runtime.md](docs/cost-aware-runtime.md) for the short-term
+runtime strategy around provider routing, usage tracking, and escalation. See
+[docs/vibe-coding-workflow.md](docs/vibe-coding-workflow.md) for the intended
+ChatGPT Plus/Codex + DeepSeek + local model collaboration loop.
+
+C/C++ can be added later for native helpers such as PTY handling,
 filesystem indexing, sandboxing, or high-volume diff work. Native helpers stay
 behind Python interfaces; they should not own the runtime protocol, approval
 policy, provider boundary, or state format.
@@ -40,6 +51,8 @@ PYTHONPATH=src python -m cocoa repl
 - `/configure codex-http [model]`
 - `/set [--persist|-p] KEY VALUE`（支持 `KEY=VALUE`，带 `--persist` 同时写入 `.cocoa/config.env`）
 - `/persist`（保存当前会话内所有临时变量到 `.cocoa/config.env`）
+- `/mode [cheap|balanced|premium|local]`（查看或切换当前模型路由模式）
+- `/usage`（查看当前 thread 的 provider/model/token 使用记录）
 - `/history`（查看当前 thread 的 turn projection）
 - `/show <id|last>`（查看 turn 或 item projection）
 - `/pending`（重新列出当前 thread 里未处理的 proposals）
@@ -161,6 +174,33 @@ Optional Codex HTTP env:
 - `COCOA_CODEX_BASE_URL` (defaults to `https://chatgpt.com/backend-api/codex`)
 - `COCOA_CODEX_TEMPERATURE`
 - `COCOA_CODEX_MAX_TOKENS`
+
+### Cost-aware modes
+
+`COCOA_MODEL_MODE` selects the active routing mode. Supported values are
+`balanced`, `cheap`, `premium`, and `local`; the default is `balanced`.
+
+Mode-specific variables can override the normal provider configuration:
+
+```sh
+COCOA_MODEL_MODE=cheap
+COCOA_CHEAP_PROVIDER=openai
+COCOA_CHEAP_OPENAI_API_KEY=...
+COCOA_CHEAP_OPENAI_MODEL=deepseek-v4
+COCOA_CHEAP_OPENAI_BASE_URL=https://api.deepseek.com/v1
+
+COCOA_PREMIUM_PROVIDER=codex-http
+COCOA_PREMIUM_CODEX_MODEL=gpt-5.3-codex
+
+COCOA_LOCAL_PROVIDER=openai
+COCOA_LOCAL_OPENAI_API_KEY=local
+COCOA_LOCAL_OPENAI_MODEL=qwen3.5-9b
+COCOA_LOCAL_OPENAI_BASE_URL=http://127.0.0.1:1234/v1
+```
+
+The mode layer is intentionally thin in the first version. It selects a provider
+profile, records a `routing_decision` event, and records a `usage_recorded`
+event with provider/model plus actual or estimated token counts.
 
 `cocoa` also auto-discovers a valid token from `${COCOA_CODEX_HOME:-$CODEX_HOME:-~/.codex}/auth.json` when `COCOA_CODEX_API_KEY` is not set. `auth.json` must contain:
 

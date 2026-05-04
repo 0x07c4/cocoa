@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import __version__
+from . import config as cocoa_config
 from .models import ItemKind, ItemRecord
 from .projection import ItemView, TurnView, load_thread_view
 from .providers import (
@@ -88,8 +89,8 @@ _CONFIGURE_MODE_DESCRIPTIONS: Mapping[str, str] = {
 }
 
 _SET_OPTION_DESCRIPTIONS: Mapping[str, str] = {
-    "--persist": "also write to .cocoa/config.env",
-    "-p": "also write to .cocoa/config.env",
+    "--persist": "also write to .cocoa/cocoa.toml",
+    "-p": "also write to .cocoa/cocoa.toml",
 }
 
 _COMMANDS_EXPECTING_ARGUMENTS = {
@@ -232,49 +233,25 @@ def _parse_config_lines(raw: str) -> dict[str, str]:
     return env
 
 
-def _load_config_env(path: Path) -> dict[str, str]:
-    if not path.is_file():
-        return {}
-    try:
-        return _parse_config_lines(path.read_text(encoding="utf-8"))
-    except OSError:
-        return {}
-
-
 def _effective_environment(cwd: Path) -> dict[str, str]:
-    home = Path.home()
-    env = dict(os.environ)
-    env.update(_load_config_env(home / ".cocoa" / "config.env"))
-    env.update(_load_config_env(cwd / ".cocoa" / "config.env"))
-    return env
-
-
-def _serialize_env_value(value: str) -> str:
-    if value == "":
-        return "\"\""
-    if any(ch.isspace() for ch in value):
-        return shlex.quote(value)
-    return value
+    config = cocoa_config.resolve_config(cwd, {})
+    mode = cocoa_config.resolve_model_mode(config)
+    return cocoa_config.to_env_mapping(config, mode)
 
 
 def _persist_environment(cwd: Path, updates: Mapping[str, str]) -> None:
-    path = cwd / ".cocoa" / "config.env"
-    existing = _load_config_env(path)
-    existing.update(updates)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        f"{key}={_serialize_env_value(value)}" for key, value in sorted(existing.items())
-    ]
-    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    data = cocoa_config.load_workspace_config(cwd)
+    data = cocoa_config.merge_session_overrides(data, updates)
+    cocoa_config.save_workspace_config(cwd, data)
 
 
 def _effective_session_environment(
     cwd: Path,
     overrides: Mapping[str, str],
 ) -> dict[str, str]:
-    env = _effective_environment(cwd)
-    env.update(overrides)
-    return env
+    config = cocoa_config.resolve_config(cwd, overrides)
+    mode = cocoa_config.resolve_model_mode(config)
+    return cocoa_config.to_env_mapping(config, mode)
 
 
 def _resolve_model_mode(env: Mapping[str, str]) -> str:
@@ -1351,6 +1328,10 @@ def _routing_payload_for_env(env: Mapping[str, str]) -> dict[str, Any]:
     return payload
 
 
+def _routing_payload_from_config(cwd: Path, overrides: Mapping[str, str]) -> dict[str, Any]:
+    return cocoa_config.config_to_routing_payload(cwd, overrides)
+
+
 def _turn_preview(turn: TurnView) -> str:
     for item in reversed(turn.items):
         if item.kind in {"agent_message", "user_message"}:
@@ -1664,7 +1645,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("/configure          configure provider in session or save config")
                 print("/set [--persist|-p] KEY VALUE")
                 print("                    set session variable (and optionally persist)")
-                print("/persist            persist current session overrides to .cocoa/config.env")
+                print("/persist            persist current session overrides to .cocoa/cocoa.toml")
                 print("/history            show turns in current thread")
                 print("/usage              show model usage in current thread")
                 print("/show <id|last>     show a turn or item projection")
@@ -1708,31 +1689,38 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     if len(args) < 3:
                         print("usage: /configure openai <api_key> <model> [base_url]")
                         continue
-                    updates = {"COCOA_PROVIDER": "openai", "COCOA_OPENAI_API_KEY": args[1], "COCOA_OPENAI_MODEL": args[2]}
+                    data = cocoa_config.load_workspace_config(cwd)
+                    data["provider_used"] = "openai"
+                    cocoa_config.set_dotted(data, "provider.openai.api_key", args[1])
+                    cocoa_config.set_dotted(data, "provider.openai.model", args[2])
                     if len(args) > 3:
-                        updates["COCOA_OPENAI_BASE_URL"] = args[3]
-                    _persist_environment(cwd, updates)
+                        cocoa_config.set_dotted(data, "provider.openai.base_url", args[3])
+                    cocoa_config.save_workspace_config(cwd, data)
                     overrides.clear()
                     rebuild_runtime()
                     env = _effective_session_environment(cwd, overrides)
-                    print("provider config persisted to .cocoa/config.env")
+                    print("provider config persisted to .cocoa/cocoa.toml")
                     print_provider_status()
                     continue
                 if mode == "codex-http":
-                    updates = {"COCOA_PROVIDER": "codex-http"}
+                    data = cocoa_config.load_workspace_config(cwd)
+                    data["provider_used"] = "codex-http"
                     if len(args) > 1:
-                        updates["COCOA_CODEX_MODEL"] = args[1]
+                        cocoa_config.set_dotted(data, "provider.codex.model", args[1])
                         if len(args) > 2:
-                            updates["COCOA_CODEX_API_KEY"] = args[2]
-                    _persist_environment(cwd, updates)
+                            cocoa_config.set_dotted(data, "provider.codex.api_key", args[2])
+                    cocoa_config.save_workspace_config(cwd, data)
                     overrides.clear()
                     rebuild_runtime()
                     env = _effective_session_environment(cwd, overrides)
-                    print("provider config persisted to .cocoa/config.env")
+                    print("provider config persisted to .cocoa/cocoa.toml")
                     print_provider_status()
                     continue
                 if mode == "clear":
-                    _persist_environment(cwd, {"COCOA_PROVIDER": ""})
+                    data = cocoa_config.load_workspace_config(cwd)
+                    data.pop("provider_used", None)
+                    data.pop("provider", None)
+                    cocoa_config.save_workspace_config(cwd, data)
                     overrides.clear()
                     rebuild_runtime()
                     env = _effective_session_environment(cwd, overrides)
@@ -1781,8 +1769,10 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if not overrides:
                     print("no session overrides to persist")
                     continue
-                _persist_environment(cwd, overrides)
-                print("session overrides persisted to .cocoa/config.env")
+                data = cocoa_config.load_workspace_config(cwd)
+                data = cocoa_config.merge_session_overrides(data, overrides)
+                cocoa_config.save_workspace_config(cwd, data)
+                print("session overrides persisted to .cocoa/cocoa.toml")
                 continue
             if line == "/status":
                 print(f"thread: {thread.id}")

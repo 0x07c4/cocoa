@@ -59,6 +59,8 @@ class EventKind(StrEnum):
     THREAD_STARTED = "thread_started"
     TURN_STARTED = "turn_started"
     TURN_COMPLETED = "turn_completed"
+    ROUTING_DECISION = "routing_decision"
+    USAGE_RECORDED = "usage_recorded"
     ITEM_STARTED = "item_started"
     ITEM_UPDATED = "item_updated"
     ITEM_COMPLETED = "item_completed"
@@ -141,4 +143,3 @@ def event(
         item_id=item_id,
         payload=payload or {},
     )
-
