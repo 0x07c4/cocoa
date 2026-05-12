@@ -37,6 +37,9 @@ class ItemKind(StrEnum):
     WORKSPACE_INSPECT = "workspace_inspect"
     FILE_READ = "file_read"
     FILE_WRITE = "file_write"
+    TASK = "task"
+    HANDOFF = "handoff"
+    REVIEW = "review"
 
 
 class ItemStatus(StrEnum):
@@ -45,6 +48,12 @@ class ItemStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     REJECTED = "rejected"
+
+
+class TaskItemStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
 
 
 class ApprovalState(StrEnum):

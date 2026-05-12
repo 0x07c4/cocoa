@@ -7,6 +7,17 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 
+from cocoa.models import (
+    ApprovalState,
+    EventKind,
+    ItemKind,
+    ItemRecord,
+    ItemStatus,
+    TurnRecord,
+    event,
+    new_id,
+    now_ms,
+)
 from cocoa.projection import load_thread_view, project_thread
 from cocoa.providers import ProviderRequest, ProviderResponse, StubProvider
 from cocoa.runtime import AgentRuntime
@@ -97,6 +108,283 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(turn.status, "interrupted")
         self.assertEqual(command_item.status, "rejected")
         self.assertEqual(command_item.approval, "rejected")
+
+    def test_projects_task_item_through_projection(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            thread_id = new_id("thr")
+            turn_id = new_id("turn")
+            item_id = new_id("item")
+            store.append(
+                event(
+                    EventKind.THREAD_STARTED,
+                    thread_id=thread_id,
+                    payload={
+                        "thread": {
+                            "id": thread_id,
+                            "cwd": str(tmp_path),
+                            "status": "active",
+                        }
+                    },
+                )
+            )
+            store.append(
+                event(
+                    EventKind.TURN_STARTED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    payload={
+                        "turn": {
+                            "id": turn_id,
+                            "thread_id": thread_id,
+                            "intent": "task_create",
+                            "status": "completed",
+                        }
+                    },
+                )
+            )
+            task_item = ItemRecord(
+                id=item_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                kind=ItemKind.TASK,
+                status=ItemStatus.COMPLETED,
+                content={
+                    "subject": "Implement login",
+                    "description": "Add user authentication",
+                    "task_status": "pending",
+                    "owner": "deepseek",
+                },
+            )
+            store.append(
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=item_id,
+                    payload={"item": task_item},
+                )
+            )
+
+            view = load_thread_view(store, thread_id)
+
+            self.assertEqual(len(view.turns), 1)
+            self.assertEqual(len(view.turns[0].items), 1)
+            item = view.turns[0].items[0]
+            self.assertEqual(item.kind, "task")
+            self.assertEqual(item.status, "completed")
+            self.assertEqual(item.content["subject"], "Implement login")
+
+    def test_projects_handoff_item_through_projection(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            thread_id = new_id("thr")
+            turn_id = new_id("turn")
+            item_id = new_id("item")
+            store.append(
+                event(
+                    EventKind.THREAD_STARTED,
+                    thread_id=thread_id,
+                    payload={
+                        "thread": {
+                            "id": thread_id,
+                            "cwd": str(tmp_path),
+                            "status": "active",
+                        }
+                    },
+                )
+            )
+            store.append(
+                event(
+                    EventKind.TURN_STARTED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    payload={
+                        "turn": {
+                            "id": turn_id,
+                            "thread_id": thread_id,
+                            "intent": "handoff",
+                            "status": "completed",
+                        }
+                    },
+                )
+            )
+            handoff_item = ItemRecord(
+                id=item_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                kind=ItemKind.HANDOFF,
+                status=ItemStatus.COMPLETED,
+                content={
+                    "from": "codex",
+                    "to": "deepseek",
+                    "task_list": ["Task 1", "Task 2"],
+                },
+            )
+            store.append(
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=item_id,
+                    payload={"item": handoff_item},
+                )
+            )
+
+            view = load_thread_view(store, thread_id)
+
+            item = view.turns[0].items[0]
+            self.assertEqual(item.kind, "handoff")
+            self.assertEqual(item.content["from"], "codex")
+            self.assertEqual(item.content["to"], "deepseek")
+
+    def test_projects_review_item_through_projection(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            thread_id = new_id("thr")
+            turn_id = new_id("turn")
+            item_id = new_id("item")
+            store.append(
+                event(
+                    EventKind.THREAD_STARTED,
+                    thread_id=thread_id,
+                    payload={
+                        "thread": {
+                            "id": thread_id,
+                            "cwd": str(tmp_path),
+                            "status": "active",
+                        }
+                    },
+                )
+            )
+            store.append(
+                event(
+                    EventKind.TURN_STARTED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    payload={
+                        "turn": {
+                            "id": turn_id,
+                            "thread_id": thread_id,
+                            "intent": "review",
+                            "status": "completed",
+                        }
+                    },
+                )
+            )
+            review_item = ItemRecord(
+                id=item_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                kind=ItemKind.REVIEW,
+                status=ItemStatus.COMPLETED,
+                content={
+                    "findings": ["LGTM"],
+                    "score": 9,
+                },
+            )
+            store.append(
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=item_id,
+                    payload={"item": review_item},
+                )
+            )
+
+            view = load_thread_view(store, thread_id)
+
+            item = view.turns[0].items[0]
+            self.assertEqual(item.kind, "review")
+            self.assertEqual(item.content["findings"], ["LGTM"])
+            self.assertEqual(item.content["score"], 9)
+
+    def test_projection_keeps_latest_task_state_by_item_id(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            thread_id = new_id("thr")
+            turn_id = new_id("turn")
+            item_id = new_id("item")
+            store.append(
+                event(
+                    EventKind.THREAD_STARTED,
+                    thread_id=thread_id,
+                    payload={
+                        "thread": {
+                            "id": thread_id,
+                            "cwd": str(tmp_path),
+                            "status": "active",
+                        }
+                    },
+                )
+            )
+            store.append(
+                event(
+                    EventKind.TURN_STARTED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    payload={
+                        "turn": {
+                            "id": turn_id,
+                            "thread_id": thread_id,
+                            "intent": "task_update",
+                            "status": "completed",
+                        }
+                    },
+                )
+            )
+            initial_item = ItemRecord(
+                id=item_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                kind=ItemKind.TASK,
+                status=ItemStatus.COMPLETED,
+                content={
+                    "subject": "Implement login",
+                    "task_status": "pending",
+                },
+            )
+            store.append(
+                event(
+                    EventKind.ITEM_COMPLETED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=item_id,
+                    payload={"item": initial_item},
+                )
+            )
+            updated_item = ItemRecord(
+                id=item_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                kind=ItemKind.TASK,
+                status=ItemStatus.COMPLETED,
+                content={
+                    "subject": "Implement login",
+                    "task_status": "in_progress",
+                },
+            )
+            store.append(
+                event(
+                    EventKind.ITEM_UPDATED,
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    item_id=item_id,
+                    payload={"item": updated_item},
+                )
+            )
+
+            view = load_thread_view(store, thread_id)
+
+            self.assertEqual(len(view.turns[0].items), 1)
+            item = view.turns[0].items[0]
+            self.assertEqual(item.kind, "task")
+            self.assertEqual(item.content["task_status"], "in_progress")
 
     def test_unknown_events_are_ignored(self) -> None:
         view = project_thread(

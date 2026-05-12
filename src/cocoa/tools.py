@@ -40,6 +40,53 @@ class CommandResult:
     approved: bool = False
 
 
+@dataclass(frozen=True)
+class ToolDescriptor:
+    name: str
+    description: str
+    read_only: bool = False
+    side_effect: bool = False
+
+
+BUILTIN_TOOLS: tuple[ToolDescriptor, ...] = (
+    ToolDescriptor(
+        name="workspace_inspect",
+        description="List and size files inside the workspace scope.",
+        read_only=True,
+    ),
+    ToolDescriptor(
+        name="file_read",
+        description="Read the content of a file inside the workspace scope.",
+        read_only=True,
+    ),
+    ToolDescriptor(
+        name="shell_command",
+        description="Propose a shell command for user approval and execution.",
+        side_effect=True,
+    ),
+    ToolDescriptor(
+        name="file_write",
+        description="Write or edit a file inside the workspace scope after user approval.",
+        side_effect=True,
+    ),
+    ToolDescriptor(
+        name="task_create",
+        description="Create a new task item in the current thread.",
+        side_effect=True,
+    ),
+    ToolDescriptor(
+        name="task_update",
+        description="Update the status or metadata of an existing task.",
+        side_effect=True,
+    ),
+    ToolDescriptor(
+        name="task_list",
+        description="List all task items in the current thread.",
+        read_only=True,
+    ),
+)
+
+
 class ShellTool:
     def __init__(self, approval: ApprovalPrompter, timeout_seconds: int = 60) -> None:
         self.approval = approval

@@ -1,12 +1,12 @@
 # AI Handoff
 
-This file is the temporary shared artifact for multi-tool vibe coding before
+This file is the active shared artifact for multi-tool vibe coding before
 `cocoa` has first-class plan / handoff / review items.
 
 Use it when Codex runs in one window and OpenCode + DeepSeek runs in another.
-Codex writes the plan and review findings. DeepSeek reads the plan, drafts the
-change, and fixes review findings. The user still approves the final side
-effect.
+Codex writes the architecture plan, task list, review findings, and acceptance
+criteria. DeepSeek implements only the concrete tasks assigned here. The user
+still approves the final side effect.
 
 ## Status
 
@@ -22,214 +22,341 @@ Allowed values:
 
 ## Goal
 
-Replace env-var-driven flat config files with a structured `.cocoa/cocoa.toml`
-configuration, keeping COCOA_* env vars as overrides for backward compatibility.
+Build `cocoa` by using `/home/chikee/workspace/claude-code-run` as the closest
+local reference implementation, while keeping `cocoa` smaller and centered on
+its own runtime contract:
 
-## Scope
+- terminal-native, not a full Claude Code clone
+- provider-agnostic, not provider-shaped
+- cost-aware, not premium-model-for-everything
+- human-in-the-loop, not autonomous by default
+- event/proposal/approval driven, not hidden tool execution
 
-Implement a `src/cocoa/config.py` module that centralizes config I/O. Rewrite
-config call sites in `src/cocoa/cli.py` and `src/cocoa/providers.py` to use the
-new module. Keep existing config keys and /configure /set /persist semantics
-unchanged — only change the storage format and loading path.
+## Reference Source
 
-Do not change the core runtime, proposals, projection, workspace, store, or
-tools modules. Do not introduce pip-level dependencies.
+Use these `claude-code-run` areas as reference material:
 
-## Files
+- `src/QueryEngine.ts`: conversation lifecycle owner around the lower-level
+  query loop
+- `src/query.ts`: streaming loop, budget checks, tool orchestration, recovery
+- `src/context.ts`: bounded user/system context assembly, git status, memory
+  files, current date
+- `src/Tool.ts` and `src/tools.ts`: tool interface, registry, permission-aware
+  filtering
+- `src/utils/tasks.ts` plus `TaskCreate/Get/List/UpdateTool`: durable task list
+  shape and agent-visible task state
+- `src/keybindings/`: explicit terminal keybinding schema and resolver
+- `src/memdir/`: memory discovery as an optional context source, not product
+  state
+- `src/query/tokenBudget.ts` and compact services: budget/compaction concepts
+- `spec/feature_*/spec-plan*.md`: concrete task-list format suitable for
+  DeepSeek execution
 
-- `src/cocoa/config.py` (new)
+Do not copy these parts into the first `cocoa` build:
+
+- full React/Ink UI
+- bundled 50+ tool surface
+- remote-control server
+- ACP bridge
+- swarm/team orchestration
+- browser/computer/voice use
+- feature-flag sprawl
+- autonomous background agents
+
+## Target Shape For Cocoa
+
+`cocoa` should borrow the architectural separation, not the product surface:
+
+1. `AgentRuntime` remains the event/proposal/approval owner.
+2. A new session/query layer should own one conversation lifecycle and call
+   `AgentRuntime` instead of pushing more behavior into `cli.py`.
+3. Tools should be explicit runtime capabilities with permission metadata, but
+   provider-originated side effects still become proposals.
+4. Context loading should be bounded, inspectable, and recorded as runtime
+   items.
+5. Tasks, handoffs, reviews, and plans should become first-class items or
+   projections so Codex and DeepSeek do not rely on hidden conversation state.
+6. Token/cost pressure should be visible through mode, usage, and budget
+   records before any automatic routing is added.
+
+## Implementation Phases
+
+### Phase 1: First-Class Task / Handoff Items
+
+Objective: replace the single mutable Markdown handoff with event-backed task
+and handoff records that can still project to readable Markdown.
+
+DeepSeek should implement this phase first.
+
+Expected behavior:
+
+- `cocoa` can create a task with subject, description, status, owner, blocked
+  dependencies, and metadata.
+- tasks are persisted in the existing append-only thread log, not a separate
+  database
+- `/tasks` lists current tasks for the thread
+- `/task <id>` shows task details
+- `/task-update <id> --status ...` records an update event
+- handoff/review/plan content can be stored as item kinds, then rendered by
+  `/show`
+
+### Phase 2: Session Engine Boundary
+
+Objective: extract a `SessionEngine` layer inspired by `QueryEngine.ts`.
+
+Expected behavior:
+
+- `cli.py` becomes a projection/controller, not the lifecycle owner
+- one session engine owns thread id, provider, store, routing overrides, and
+  per-turn context
+- `ask`, `repl`, `/escalate`, `/run`, proposal apply/reject use the same engine
+  methods
+- runtime event semantics remain unchanged
+
+### Phase 3: Context Builder
+
+Objective: add a bounded context builder inspired by `context.ts`.
+
+Expected behavior:
+
+- include current date
+- include bounded git status if the workspace is a git repo
+- discover and read `AGENTS.md`, `CLAUDE.md`, and explicitly referenced
+  instruction files within workspace scope
+- keep `@path` references visible and recorded as `FILE_READ` or
+  `WORKSPACE_INSPECT`
+- avoid broad scans and truncate large content with clear markers
+
+### Phase 4: Tool Registry And Permission Policy
+
+Objective: introduce a minimal `Tool` interface without turning `cocoa` into a
+large autonomous tool runner.
+
+Initial core tools:
+
+- workspace inspect
+- file read
+- shell command proposal
+- file write/edit proposal
+- task create/get/list/update
+
+Constraints:
+
+- model output may request tool-like actions, but side effects still become
+  pending proposals unless the user explicitly accepts/applies
+- read-only tools can run only inside workspace scope
+- write/command tools must pass the existing approval boundary
+- no MCP, web, browser, computer-use, or remote tools in this phase
+
+### Phase 5: Budget And Compaction
+
+Objective: make cost/context pressure visible before adding smarter automation.
+
+Expected behavior:
+
+- `/usage` keeps working
+- add a simple budget warning when estimated context exceeds configured limits
+- add a thread-summary item type
+- `/compact` creates a summary item and records what was summarized
+- escalation should prefer summary + selected items + diff over full replay
+
+## DeepSeek Task List
+
+### Task 0: Baseline Orientation
+
+Status: `pending`
+
+Scope:
+
+- read `README.md`
+- read `docs/architecture.md`
+- read this `docs/ai-handoff.md`
+- inspect `src/cocoa/models.py`, `runtime.py`, `projection.py`, `cli.py`
+- do not modify unrelated files
+
+Acceptance:
+
+- report current task-relevant structure before editing
+- identify any blocker before implementation
+
+### Task 1: Add Task Item Types And Projection
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/models.py`
+- `src/cocoa/projection.py`
+- `tests/test_projection.py`
+- `tests/test_models.py` if needed
+
+Implementation:
+
+- add item kinds for `TASK`, `HANDOFF`, and `REVIEW`
+- keep existing enum values backward compatible
+- ensure projection keeps latest task state by item id
+- add tests for task/handoff/review item projection
+
+Acceptance:
+
+- old thread logs still load
+- new item kinds show through `load_thread_view`
+- no change to command/file proposal behavior
+
+### Task 2: Runtime Task CRUD Events
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/runtime.py`
+- `tests/test_runtime.py`
+
+Implementation:
+
+- add runtime methods to create, update, and list task items within a thread
+- use append-only events only
+- task content shape:
+  - `subject`
+  - `description`
+  - `status`: `pending | in_progress | completed`
+  - `owner`
+  - `blocks`
+  - `blocked_by`
+  - `metadata`
+- support metadata merge on update
+- reject invalid status values
+
+Acceptance:
+
+- creating a task records an item event
+- updating a task records a new latest item state
+- listing tasks is projection-derived
+- no separate task database is introduced
+
+### Task 3: REPL Task Commands
+
+Status: `completed`
+
+Files:
+
 - `src/cocoa/cli.py`
-- `src/cocoa/providers.py`
-- `tests/test_config.py` (new)
 - `tests/test_cli.py`
-- `docs/cost-aware-runtime.md` (optional, reflect config migration)
 
-## Codex Plan
+Implementation:
 
-### Phase 1: Design the TOML schema
+- add `/tasks`
+- add `/task <id>`
+- add `/task-add <subject> -- <description>`
+- add `/task-update <id> --status <status>`
+- add completions for the new slash commands where current completion helpers
+  already support command candidates
 
-```
-# .cocoa/cocoa.toml
+Acceptance:
 
-default_mode = "balanced"
+- task commands work in the same thread as normal turns
+- `/show <task_item_id>` displays the task item
+- command parsing remains stdlib-only
+- no prompt-toolkit-only behavior
 
-[provider.openai]
-api_key = "sk-xxx"
-model = "gpt-5-mini"
-base_url = "https://api.openai.com/v1"
-timeout_seconds = 60
-temperature = 0.7
-max_tokens = 4096
+### Task 4: Context Builder
 
-[provider.codex]
-api_key = "xxx"
-model = "gpt-5.4"
-base_url = "https://chatgpt.com/backend-api/codex"
-codex_home = "~/.codex"
-timeout_seconds = 120
-temperature = 0.7
-max_tokens = 4096
+Status: `completed`
 
-# Mode overrides — ANY key under [mode.X.provider.Y] mirrors [provider.Y]
-# top-level provider keys.  Missing keys fall through to [provider.Y].
+Files:
 
-[mode.premium]
-provider = "codex"   # optional: force provider when mode=premium
+- `src/cocoa/context.py` or a small runtime-local helper
+- `src/cocoa/runtime.py`
+- `tests/test_runtime.py`
+- `tests/test_workspace.py` if needed
 
-[mode.premium.provider.openai]
-model = "deepseek-v4-pro"
+Implementation:
 
-[mode.cheap.provider.openai]
-model = "deepseek-v4-flash"
-base_url = "https://api.deepseek.com/v1"
-```
+- move context assembly out of ad hoc runtime helpers
+- include current date
+- include bounded git status snapshot
+- include workspace instruction files only when inside scope
+- preserve and test existing `@path` behavior
+- keep truncation limits explicit constants
 
-### Phase 2: Create src/cocoa/config.py
+Acceptance:
 
-New module. No third-party dependencies — use stdlib `tomllib` (Py 3.11+) for
-reading and write TOML by hand with a small serializer (the structure is flat
-enough that hand-rolling is cleaner than bringing in `tomli-w`).
+- provider request receives deterministic bounded context
+- context reads are represented as runtime items
+- ignored and out-of-workspace paths stay rejected
 
-Module public API:
+### Task 5: Minimal Tool Registry
 
-```
-load_workspace_config(cwd: Path) -> dict[str, Any]
-    # returns the merged dict from ~/.cocoa/cocoa.toml + cwd/.cocoa/cocoa.toml
-    # project-level keys override global keys; scalar keys like default_mode
-    # replace; dict keys like [provider.openai] merge
+Status: `completed`
 
-legacy_load_workspace_config(cwd: Path) -> dict[str, Any]
-    # tries .cocoa/config.env (old format), converts flat key=value into the
-    # same dict shape, keyed by prefix COCOA_OPENAI_*, COCOA_CODEX_*, etc.
+Files:
 
-save_workspace_config(cwd: Path, data: dict[str, Any]) -> None
-    # writes cwd/.cocoa/cocoa.toml with the given dict
+- `src/cocoa/tools.py`
+- `src/cocoa/runtime.py`
+- `tests/test_runtime.py`
+- `tests/test_tools.py` if useful
 
-resolve_config(cwd: Path, session_overrides: Mapping[str, str]) -> dict[str, Any]
-    # full resolved config dict merged from:
-    #   legacy .cocoa/config.env (auto-migrate if toml missing)
-    #   ~/.cocoa/cocoa.toml
-    #   <cwd>/.cocoa/cocoa.toml
-    #   COCOA_* environment variables (highest priority)
-    #   session /set overrides (highest priority, flat string keys)
+Implementation:
 
-to_env_mapping(config: dict[str, Any], mode: str) -> dict[str, str]
-    # given resolved config + active mode, produces the COCOA_PROVIDER=,
-    # COCOA_OPENAI_MODEL=, etc. env dict that existing provider_from_env /
-    # _provider_environment_for_mode consumer code expects.
-    # This is the bridge: downstream code stays on env-dict input while
-    # the config module handles toml merging.
+- define a minimal tool descriptor with name, description, read-only flag, and
+  side-effect flag
+- register the current shell and file proposal operations through descriptors
+- do not expose autonomous tool execution to providers
+- keep approval behavior unchanged
 
-config_to_routing_payload(cwd: Path, session_overrides: Mapping[str, str]) -> dict[str, Any]
-    # equivalent of today's _routing_payload_for_env, but powered by resolve_config
-```
+Acceptance:
 
-#### Detail: legacy auto-migration
+- shell command proposals still require `/accept`
+- file proposals still require `/apply`
+- read-only operations remain workspace-scoped
 
-When `cocoa.toml` does not exist but `config.env` exists, `resolve_config` should
-read the legacy file but also print a one-line warning: `hint: migrate to
-.cocoa/cocoa.toml for structured config`.  Do not auto-overwrite; leave migration
-explicit.
+### Task 6: Usage Budget Warning
 
-`/persist` and `/configure` always write `.cocoa/cocoa.toml` (the legacy writer
-is deprecated but kept read-only for migration).
+Status: `completed`
 
-#### Detail: TOML serialization
+Files:
 
-Write a private `_serialize_toml(data: dict[str, Any]) -> str` that handles:
+- `src/cocoa/runtime.py`
+- `src/cocoa/cli.py`
+- `src/cocoa/config.py`
+- `tests/test_config.py`
+- `tests/test_runtime.py`
 
-- top-level scalars: `key = "value"` or `key = 123`
-- `[section]` headers
-- `[section.sub]` dotted sections
-- quoted string values (always use double quotes, escape `"` and `\`)
+Implementation:
 
-Only write the subset needed by our schema. Do not implement a general-purpose
-TOML serializer.
+- add optional `budget.max_context_chars` and `budget.max_output_tokens`
+  structured config keys
+- record a warning in routing or usage payload when estimated context exceeds
+  the configured limit
+- show the warning in `/usage` or `/status`
+- do not auto-compact in this task
 
-#### Detail: env var override
+Acceptance:
 
-`resolve_config` applies env vars last:
-1. Walk known COCOA_* keys
-2. Map them into the config dict shape:
-   - `COCOA_PROVIDER` → `provider_used` key
-   - `COCOA_MODEL_MODE` → `default_mode`
-   - `COCOA_OPENAI_API_KEY` → `provider.openai.api_key`
-   - `COCOA_OPENAI_MODEL` → `provider.openai.model`
-   - ... etc for all COCOA_OPENAI_* and COCOA_CODEX_* keys
-   - `COCOA_PREMIUM_PROVIDER` → `mode.premium.provider`
-   - `COCOA_PREMIUM_OPENAI_MODEL` → `mode.premium.provider.openai.model`
-   - ... same for CHEAP, BALANCED, LOCAL
-
-### Phase 3: Rewrite cli.py config consumers
-
-Replace these functions to delegate to `cocoa.config`:
-
-| Old function | New behavior |
-|---|---|
-| `_effective_environment()` | calls `resolve_config(cwd, {})` then `to_env_mapping()` |
-| `_effective_session_environment()` | calls `resolve_config(cwd, overrides)` then `to_env_mapping()` |
-| `_persist_environment()` | calls `save_workspace_config()` — writes toml, not .env |
-| `_provider_environment_for_mode()` | delegates to config module |
-| `_routing_payload_for_env()` | calls `config_to_routing_payload()` |
-| `_resolve_model_mode()` | reads `default_mode` from resolved config |
-| `_resolve_provider_status_for_env()` | unchanged (already works on env dict produced by to_env_mapping) |
-| `/configure openai` | writes `provider.openai` section into toml |
-| `/configure codex-http` | writes `provider.codex` section into toml |
-| `/configure clear` | clears `provider` section in toml |
-| `/set --persist` | converts flat KEY=VALUE to toml key and persists |
-| `/persist` | converts session overrides to toml and writes |
-| `/mode` | writes `default_mode` in toml (session-only, no persist unless `/persist` is also run) |
-
-Key constraint: the internal `env: dict[str, str]` passed around in cli.py and
-consumed by `provider_from_env(env)` / `_routing_payload_for_env(env)` must keep
-working. The config module returns that same shape via `to_env_mapping()`.
-
-### Phase 4: Update tests
-
-Move config-related tests from `tests/test_cli.py` into `tests/test_config.py`:
-
-- `test_parse_config_lines_*` → test TOML loading
-- `test_effective_environment_*` → test resolve_config
-- `test_persist_environment_*` → test save/load roundtrip with toml
-- `test_provider_status_*` → keep in test_cli (they test CLI behavior)
-- `test_model_mode_*` → move to test_config
-- `test_repl_configure_*` → keep in test_cli (test REPL behavior)
-
-Add new tests for:
-
-- TOML schema validation
-- legacy .env migration path
-- env var override priority
-- mode-specific provider override merging
-- config serialization roundtrip
-
-### Phase 5: Acceptance criteria
-
-- `cocoa doctor` shows correct provider details when `.cocoa/cocoa.toml` exists
-- `/configure openai` writes to `.cocoa/cocoa.toml`, not `.cocoa/config.env`
-- `/mode premium` uses `[mode.premium.provider.openai]` overrides from toml
-- Running cocoa on a workspace with only legacy `config.env` still works and
-  prints the migration hint
-- COCOA_OPENAI_API_KEY env var overrides toml value
-- All existing tests pass; new config tests pass
-- Test command: `rtk python -m unittest tests.test_config tests.test_cli tests.test_runtime`
+- default behavior unchanged when no budget is configured
+- warning is event-backed and testable
 
 ## Constraints
 
-- Do not add pip dependencies. Use stdlib `tomllib` for reading, hand-roll toml writing.
-- Do not change provider selection logic in providers.py beyond adapting one entry point.
-- Do not touch runtime, proposals, tools, workspace, store, projection modules.
-- Do not change REPL UI (the same / commands must work identically).
-- Do not break backward compat: if a user has only old `.cocoa/config.env`, it must still work.
-- Keep the config surface small — no new concepts beyond what's in the schema above.
+- Keep Python-first and stdlib-first.
+- Do not add pip dependencies.
+- Do not change provider APIs unless a task explicitly requires it.
+- Do not introduce React/Ink/TUI.
+- Do not copy `claude-code-run` wholesale.
+- Do not implement autonomous multi-agent orchestration.
+- Do not bypass proposal/diff/apply gates.
+- Keep DeepSeek work scoped to one task at a time.
 
 ## Implementer Prompt
 
-Read this handoff file and implement only the Codex Plan.
+Read this file and implement only the first `pending` DeepSeek task unless the
+user explicitly asks for another task.
 
-Do not redesign the approach. Do not modify files outside Scope / Files. If the
-plan is underspecified or appears wrong, stop and report the blocker instead of
-inventing a larger task.
+Before editing, report:
+
+- which task you selected
+- files you expect to change
+- any blocker or ambiguity
 
 After implementation, report:
 
@@ -238,53 +365,16 @@ After implementation, report:
 - tests run
 - known risks or blockers
 
-## Implementation Notes
+If the plan is underspecified or appears wrong, stop and report the blocker
+instead of inventing a larger design.
 
-- Python 3.12+ is required (pyproject.toml confirms). `tomllib` is stdlib since 3.11.
-- The current `_parse_config_lines()` is ~30 lines. The TOML reader replaces it entirely.
-- `_persist_environment()` is ~10 lines. Replace with toml writer.
-- `_provider_environment_for_mode()` is ~50 lines of mode-prefix mapping. Simplify by
-  having the TOML reader resolve mode overrides at load time.
-- The `[mode.X.provider.Y]` table merging follows this rule: when `mode=X` is active,
-  any keys under `[mode.X.provider.Y]` are merged on top of `[provider.Y]`. So if
-  `[provider.openai]` has `model = "default"` and `[mode.premium.provider.openai]`
-  has `model = "premium-model"`, the resolved value is `"premium-model"`.
-- If `[mode.X]` has `provider = "codex"`, force the active provider to `codex` for
-  that mode regardless of `[provider.openai]` or `[provider.codex]` config.
+## Codex Review Checklist
 
-## Test Results
+Codex should review DeepSeek changes against these points:
 
-All 141 tests pass (21 new config tests, 37 cli tests, 42 runtime tests, 41 other):
-```
-$ rtk python -m unittest discover -s tests -p "*.py"
-OK (141 tests)
-```
-
-## Implementation Notes
-
-### TOML schema conflict resolution
-
-The original schema used `[mode.X]` with `provider = "codex"` alongside `[mode.X.provider.Y]` for overrides. This is a TOML type conflict (a key cannot be both a string and a table). Fixed by using `[mode.X.overrides.Y]` for provider overrides while keeping `[mode.X] provider = "codex"` for the forced provider routing.
-
-### Migration warning
-
-When legacy `.cocoa/config.env` is used without a `.cocoa/cocoa.toml`, a one-line hint is printed to stderr once per process per workspace.
-
-## Reviewer Prompt
-
-Review the current diff against this handoff file.
-
-Stay in review mode. Do not write or rewrite the patch. Lead with findings,
-ordered by severity, and identify whether the diff is ready for user approval.
-
-Check:
-
-- whether the implementation follows the Codex Plan
-- scope drift
-- bugs or behavioral regressions
-- missing tests
-- approval blockers
-
-## Final Approval Notes
-
-Pending Codex review.
+- does the change preserve append-only runtime state?
+- are all side effects still behind approval?
+- does projection, not CLI ad hoc state, define current task state?
+- are tests focused on the new contract?
+- did DeepSeek avoid unrelated refactors?
+- did the implementation copy only the useful pattern from `claude-code-run`?

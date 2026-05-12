@@ -16,6 +16,32 @@
 Native helpers are implementation details behind Python interfaces. They should
 not own the runtime protocol, approval policy, provider protocol, or JSONL state.
 
+## Reference Implementation
+
+`/home/chikee/workspace/claude-code-run` is the local reference for how a mature
+terminal coding agent separates responsibilities. `cocoa` should borrow its
+structural lessons, not its full product surface.
+
+Useful reference areas:
+
+- `QueryEngine.ts`: one conversation lifecycle owner above the lower-level query
+  loop
+- `query.ts`: budget checks, streaming recovery, and tool orchestration as
+  runtime concerns
+- `context.ts`: bounded context assembly for git status, instruction files, and
+  current date
+- `Tool.ts` / `tools.ts`: explicit tool descriptors, registry, and
+  permission-aware filtering
+- `utils/tasks.ts` and Task* tools: durable task state visible to agents and UI
+- `spec/feature_*/spec-plan*.md`: implementation plans decomposed into tasks
+  that a cheaper coding model can execute
+
+The first `cocoa` build should not copy Claude Code's large Ink UI, remote
+control bridge, ACP server, swarm/team orchestration, browser/computer/voice
+tools, or broad feature-flag surface. Those are product multipliers; `cocoa`
+still needs to make its runtime contract, approvals, context, task handoff, and
+cost controls solid first.
+
 ## Runtime Primitives
 
 `cocoa` uses the same broad shape as Codex's runtime model, but keeps the first
@@ -104,6 +130,22 @@ Expected provider adapters:
 - external CLI bridge
 
 The runtime should keep working if the provider changes.
+
+## Session Engine Boundary
+
+The CLI should remain a projection and controller. Long-lived conversation
+state should move behind a session/query layer similar in role to
+`claude-code-run`'s `QueryEngine`, adapted to `cocoa` primitives:
+
+- owns the active thread, provider, store, routing overrides, and per-turn
+  context
+- calls `AgentRuntime` for event creation and side-effect boundaries
+- exposes methods for user turns, escalation, manual commands, proposals, and
+  future task operations
+- keeps `cli.py` from accumulating lifecycle logic
+
+This boundary should not weaken the append-only event model. The session layer
+coordinates a turn; it does not become a second source of truth.
 
 ## Cost-Aware Routing Boundary
 

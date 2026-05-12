@@ -365,6 +365,65 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("Workspace file map", request.workspace_context or "")
             self.assertIn("app.py", request.workspace_context or "")
 
+    def test_runtime_includes_date_in_workspace_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "hello"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.workspace_context)
+            self.assertIn("Current date and time:", request.workspace_context or "")
+
+    def test_runtime_includes_git_status_in_workspace_context(self) -> None:
+        from tempfile import TemporaryDirectory
+        import subprocess
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@test"], cwd=tmp_path, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+            (tmp_path / "readme.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "status?"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.workspace_context)
+            self.assertIn("Git status:", request.workspace_context or "")
+
+    def test_runtime_includes_instruction_files_in_workspace_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "AGENTS.md").write_text(
+                "# Agent Instructions\n\nBe helpful.\n", encoding="utf-8"
+            )
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "hello"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.workspace_context)
+            self.assertIn("Instruction file:", request.workspace_context or "")
+            self.assertIn("AGENTS.md", request.workspace_context or "")
+            self.assertIn("Be helpful.", request.workspace_context or "")
+
     def test_runtime_reads_prompt_path_references_as_context_items(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -945,6 +1004,242 @@ class RuntimeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "path is ignored"):
                 runtime.apply_proposed_file_write(thread, turn_result.proposals[0].id)
+
+
+    def test_runtime_creates_task_item(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            item = runtime.create_task(
+                thread,
+                "Implement login",
+                description="Add user authentication",
+                owner="deepseek",
+                blocks=["auth_design"],
+                blocked_by=["db_setup"],
+                metadata={"priority": "high"},
+            )
+            rows = store.read_thread(thread.id)
+
+            self.assertEqual(item.kind, "task")
+            self.assertEqual(item.content["subject"], "Implement login")
+            self.assertEqual(item.content["description"], "Add user authentication")
+            self.assertEqual(item.content["status"], "pending")
+            self.assertEqual(item.content["owner"], "deepseek")
+            self.assertEqual(item.content["blocks"], ["auth_design"])
+            self.assertEqual(item.content["blocked_by"], ["db_setup"])
+            self.assertEqual(item.content["metadata"], {"priority": "high"})
+            event_kinds = [row["kind"] for row in rows]
+            self.assertIn("turn_started", event_kinds)
+            self.assertIn("item_completed", event_kinds)
+            self.assertIn("turn_completed", event_kinds)
+
+    def test_runtime_updates_task_status(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            item = runtime.create_task(thread, "Implement login")
+            updated = runtime.update_task(thread, item.id, status="in_progress")
+            rows = store.read_thread(thread.id)
+
+            self.assertEqual(updated.content["status"], "in_progress")
+            updated_events = [
+                row for row in rows if row["kind"] == "item_updated"
+            ]
+            self.assertEqual(len(updated_events), 1)
+
+    def test_runtime_updates_task_metadata_merge(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            item = runtime.create_task(
+                thread, "Refactor", metadata={"priority": "low", "tags": ["cleanup"]}
+            )
+            updated = runtime.update_task(
+                thread, item.id, metadata={"priority": "high", "assignee": "alice"}
+            )
+
+            self.assertEqual(updated.content["metadata"]["priority"], "high")
+            self.assertEqual(updated.content["metadata"]["tags"], ["cleanup"])
+            self.assertEqual(updated.content["metadata"]["assignee"], "alice")
+
+    def test_runtime_rejects_invalid_task_status(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            item = runtime.create_task(thread, "Test")
+            with self.assertRaisesRegex(ValueError, "invalid task status"):
+                runtime.update_task(thread, item.id, status="invalid_status")
+
+    def test_runtime_create_task_requires_subject(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            with self.assertRaisesRegex(ValueError, "task subject is required"):
+                runtime.create_task(thread, "")
+
+    def test_runtime_lists_tasks(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            t1 = runtime.create_task(thread, "Task one")
+            t2 = runtime.create_task(thread, "Task two")
+            t3 = runtime.create_task(thread, "Task three")
+            runtime.update_task(thread, t3.id, status="completed")
+
+            tasks = runtime.list_tasks(thread)
+
+            self.assertEqual(len(tasks), 3)
+            subjects = [t.content["subject"] for t in tasks]
+            self.assertIn("Task one", subjects)
+            self.assertIn("Task two", subjects)
+            self.assertIn("Task three", subjects)
+
+    def test_runtime_list_tasks_reflects_updates(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            item = runtime.create_task(thread, "Makes non-trivial")
+            runtime.update_task(thread, item.id, status="in_progress")
+
+            tasks = runtime.list_tasks(thread)
+
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0].content["status"], "in_progress")
+            self.assertEqual(tasks[0].content["subject"], "Makes non-trivial")
+
+    def test_runtime_updates_task_owner_and_blocks(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            item = runtime.create_task(thread, "Test", owner="alice")
+            updated = runtime.update_task(
+                thread, item.id, owner="bob", blocks=["step1"], blocked_by=["step0"]
+            )
+            tasks = runtime.list_tasks(thread)
+
+            self.assertEqual(tasks[0].content["owner"], "bob")
+            self.assertEqual(tasks[0].content["blocks"], ["step1"])
+            self.assertEqual(tasks[0].content["blocked_by"], ["step0"])
+
+    def test_runtime_records_budget_warning_when_context_exceeds_limit(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(
+                store, StubProvider(), budget={"max_context_chars": 10}
+            )
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "a long prompt that exceeds the tiny budget"))
+            rows = store.read_thread(thread.id)
+
+            routing = next(row for row in rows if row["kind"] == "routing_decision")
+            warning = routing["payload"].get("budget_warning")
+            self.assertIsNotNone(warning)
+            self.assertIn("budget.max_context_chars", warning)
+            self.assertIn("exceeds", warning)
+
+    def test_runtime_no_budget_warning_when_within_limit(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(
+                store, StubProvider(), budget={"max_context_chars": 1_000_000}
+            )
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "short"))
+            rows = store.read_thread(thread.id)
+
+            routing = next(row for row in rows if row["kind"] == "routing_decision")
+            warning = routing["payload"].get("budget_warning")
+            self.assertIsNone(warning)
+
+    def test_runtime_no_budget_warning_when_no_budget_configured(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "any text"))
+            rows = store.read_thread(thread.id)
+
+            routing = next(row for row in rows if row["kind"] == "routing_decision")
+            warning = routing["payload"].get("budget_warning")
+            self.assertIsNone(warning)
+
+    def test_runtime_budget_warning_counts_workspace_context(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "AGENTS.md").write_text(
+                "x" * 5000, encoding="utf-8"
+            )
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(
+                store, StubProvider(), budget={"max_context_chars": 100}
+            )
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(
+                runtime.run_user_turn(thread, "follow instructions")
+            )
+            rows = store.read_thread(thread.id)
+
+            routing = next(row for row in rows if row["kind"] == "routing_decision")
+            warning = routing["payload"].get("budget_warning")
+            self.assertIsNotNone(warning)
+            self.assertIn("budget.max_context_chars", warning or "")
+            self.assertGreater(routing["payload"]["estimated_input_tokens"], 100)
 
 
 if __name__ == "__main__":

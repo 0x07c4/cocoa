@@ -1,19 +1,20 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any, Mapping
 
+from . import context as ctx
 from .models import (
     ApprovalState,
     EventKind,
-    ThreadStatus,
     ItemKind,
     ItemRecord,
     ItemStatus,
+    TaskItemStatus,
     ThreadRecord,
+    ThreadStatus,
     TurnRecord,
     TurnStatus,
     event,
@@ -24,7 +25,7 @@ from .providers import ProviderAdapter, ProviderRequest
 from .projection import TurnView, load_thread_view
 from .proposals import CommandProposal, FileEditProposal, FileWriteProposal, parse_proposals
 from .store import JsonlStore
-from .tools import CommandResult, ShellTool
+from .tools import BUILTIN_TOOLS, CommandResult, ConsoleApprovalPrompter, ShellTool, ToolDescriptor
 from .workspace import WorkspaceScope
 
 
@@ -42,21 +43,29 @@ class WorkspaceContext:
     items: tuple[ItemRecord, ...] = ()
 
 
-_PATH_REFERENCE_RE = re.compile(
-    r"(?<![\w@])@(?P<path>[A-Za-z0-9][A-Za-z0-9._/\-]*)(?=$|[\s,.;:!?)}\]])"
-)
-_MAX_WORKSPACE_MAP_ENTRIES = 80
-_MAX_CONTEXT_REFERENCES = 6
-_MAX_CONTEXT_FILE_BYTES = 32_000
-_MAX_WORKSPACE_CONTEXT_CHARS = 90_000
 _MAX_THREAD_CONTEXT_CHARS = 48_000
 _MAX_CONTEXT_FIELD_CHARS = 4_000
 
 
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    return None
+
+
 class AgentRuntime:
-    def __init__(self, store: JsonlStore, provider: ProviderAdapter) -> None:
+    def __init__(
+        self,
+        store: JsonlStore,
+        provider: ProviderAdapter,
+        budget: Mapping[str, Any] | None = None,
+    ) -> None:
         self.store = store
         self.provider = provider
+        self.budget = dict(budget) if budget else {}
+        self._max_context_chars: int | None = _int_or_none(
+            self.budget.get("max_context_chars")
+        )
 
     def start_thread(self, cwd: Path, title: str | None = None) -> ThreadRecord:
         thread = ThreadRecord(id=new_id("thr"), cwd=str(cwd.resolve()), title=title)
@@ -149,6 +158,143 @@ class AgentRuntime:
             )
         )
         return completed
+
+    def create_task(
+        self,
+        thread: ThreadRecord,
+        subject: str,
+        description: str = "",
+        *,
+        owner: str | None = None,
+        blocks: list[str] | None = None,
+        blocked_by: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ItemRecord:
+        if not isinstance(subject, str) or not subject.strip():
+            raise ValueError("task subject is required")
+
+        turn = TurnRecord(
+            id=new_id("turn"),
+            thread_id=thread.id,
+            intent="task_create",
+            status=TurnStatus.COMPLETED,
+        )
+        content: dict[str, Any] = {
+            "subject": subject.strip(),
+            "description": description or "",
+            "status": TaskItemStatus.PENDING.value,
+        }
+        if owner is not None:
+            content["owner"] = owner
+        if blocks is not None:
+            content["blocks"] = list(blocks)
+        if blocked_by is not None:
+            content["blocked_by"] = list(blocked_by)
+        if metadata is not None:
+            content["metadata"] = dict(metadata)
+
+        item = ItemRecord(
+            id=new_id("item"),
+            thread_id=thread.id,
+            turn_id=turn.id,
+            kind=ItemKind.TASK,
+            status=ItemStatus.COMPLETED,
+            content=content,
+            completed_at_ms=now_ms(),
+        )
+        self.store.append_many([
+            event(
+                EventKind.TURN_STARTED,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                payload={"turn": turn},
+            ),
+            event(
+                EventKind.ITEM_COMPLETED,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                item_id=item.id,
+                payload={"item": item},
+            ),
+            event(
+                EventKind.TURN_COMPLETED,
+                thread_id=thread.id,
+                turn_id=turn.id,
+                payload={"turn": turn},
+            ),
+        ])
+        return item
+
+    def update_task(
+        self,
+        thread: ThreadRecord,
+        item_id: str,
+        *,
+        status: str | None = None,
+        owner: str | None = None,
+        blocks: list[str] | None = None,
+        blocked_by: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ItemRecord:
+        existing = self._find_task_item(thread, item_id)
+        content = dict(existing.content)
+
+        if status is not None:
+            try:
+                validated = TaskItemStatus(status)
+            except ValueError:
+                valid_vals = ", ".join(v.value for v in TaskItemStatus)
+                raise ValueError(
+                    f"invalid task status: {status!r}, expected one of: {valid_vals}"
+                )
+            content["status"] = validated.value
+        if owner is not None:
+            content["owner"] = owner
+        if blocks is not None:
+            content["blocks"] = list(blocks)
+        if blocked_by is not None:
+            content["blocked_by"] = list(blocked_by)
+        if metadata is not None:
+            existing_meta = content.get("metadata", {})
+            if isinstance(existing_meta, dict):
+                merged = dict(existing_meta)
+            else:
+                merged = {}
+            merged.update(metadata)
+            content["metadata"] = merged
+
+        item = ItemRecord(
+            id=item_id,
+            thread_id=thread.id,
+            turn_id=existing.turn_id,
+            kind=ItemKind.TASK,
+            status=ItemStatus.COMPLETED,
+            content=content,
+            completed_at_ms=now_ms(),
+        )
+        self.store.append(
+            event(
+                EventKind.ITEM_UPDATED,
+                thread_id=thread.id,
+                turn_id=existing.turn_id,
+                item_id=item_id,
+                payload={"item": item},
+            )
+        )
+        return item
+
+    def list_tasks(self, thread: ThreadRecord) -> tuple[ItemRecord, ...]:
+        view = load_thread_view(self.store, thread.id)
+        tasks: list[ItemRecord] = []
+        for turn in view.turns:
+            for item_view in turn.items:
+                if item_view.kind != ItemKind.TASK.value:
+                    continue
+                tasks.append(self._item_record_from_view(item_view, thread))
+        return tuple(tasks)
+
+    def list_registered_tools(self) -> tuple[ToolDescriptor, ...]:
+        return BUILTIN_TOOLS
 
     async def run_user_turn(self, thread: ThreadRecord, prompt: str) -> str:
         result = await self.run_user_turn_with_result(thread, prompt)
@@ -886,7 +1032,22 @@ class AgentRuntime:
         if model is not None:
             payload.setdefault("model", model)
         payload.setdefault("reason", "runtime provider selection")
-        payload["estimated_input_tokens"] = self._estimate_request_tokens(request)
+        estimated_input = self._estimate_request_tokens(request)
+        payload["estimated_input_tokens"] = estimated_input
+
+        if self._max_context_chars is not None:
+            parts = [
+                request.prompt or "",
+                request.thread_context or "",
+                request.workspace_context or "",
+            ]
+            total_context = sum(len(p) for p in parts)
+            if total_context > self._max_context_chars:
+                payload["budget_warning"] = (
+                    f"context ({total_context} chars) exceeds "
+                    f"budget.max_context_chars ({self._max_context_chars})"
+                )
+
         return payload
 
     def _usage_payload(
@@ -947,176 +1108,13 @@ class AgentRuntime:
         prompt: str,
     ) -> WorkspaceContext:
         scope = WorkspaceScope(Path(thread.cwd))
-        sections: list[str] = []
-        items: list[ItemRecord] = []
-
-        workspace_map = self._workspace_map_context(scope)
-        if workspace_map:
-            sections.append(workspace_map)
-
-        references = self._extract_path_references(prompt)
-        if references:
-            reference_sections = ["Referenced workspace paths:"]
-            for raw_path in references[:_MAX_CONTEXT_REFERENCES]:
-                item, context_text = self._referenced_path_context_item(
-                    thread,
-                    turn,
-                    scope,
-                    raw_path,
-                )
-                items.append(item)
-                reference_sections.append(context_text)
-            skipped = len(references) - _MAX_CONTEXT_REFERENCES
-            if skipped > 0:
-                reference_sections.append(
-                    f"- skipped {skipped} additional @path reference(s)"
-                )
-            sections.append("\n\n".join(reference_sections))
-
-        text = "\n\n".join(section for section in sections if section.strip()).strip()
-        if not text:
-            return WorkspaceContext(text=None, items=tuple(items))
-        if len(text) > _MAX_WORKSPACE_CONTEXT_CHARS:
-            text = (
-                text[:_MAX_WORKSPACE_CONTEXT_CHARS]
-                + "\n\n[workspace context truncated by cocoa]"
-            )
-        return WorkspaceContext(text=text, items=tuple(items))
-
-    def _workspace_map_context(self, scope: WorkspaceScope) -> str | None:
-        try:
-            entries = scope.inspect(".", max_entries=_MAX_WORKSPACE_MAP_ENTRIES)
-        except (OSError, ValueError) as exc:
-            return f"Workspace file map unavailable: {exc}"
-        if not entries:
-            return "Workspace file map: empty workspace"
-        lines = [
-            f"Workspace file map (first {len(entries)} visible entries; ignored paths omitted):"
-        ]
-        for entry in entries:
-            lines.append(f"- {entry.path} ({entry.size} bytes)")
-        return "\n".join(lines)
-
-    def _extract_path_references(self, prompt: str) -> tuple[str, ...]:
-        seen: set[str] = set()
-        references: list[str] = []
-        for match in _PATH_REFERENCE_RE.finditer(prompt):
-            path = match.group("path").strip()
-            if not path or path in seen:
-                continue
-            seen.add(path)
-            references.append(path)
-        return tuple(references)
-
-    def _referenced_path_context_item(
-        self,
-        thread: ThreadRecord,
-        turn: TurnRecord,
-        scope: WorkspaceScope,
-        raw_path: str,
-    ) -> tuple[ItemRecord, str]:
-        try:
-            target = scope.resolve(raw_path)
-            relative = target.relative_to(scope.root).as_posix()
-            if scope.is_ignored(relative):
-                raise ValueError(f"path is ignored: {relative}")
-            if not target.exists():
-                raise FileNotFoundError(relative)
-            if target.is_dir():
-                return self._referenced_directory_context_item(
-                    thread,
-                    turn,
-                    scope,
-                    relative,
-                )
-            if target.is_file():
-                return self._referenced_file_context_item(
-                    thread,
-                    turn,
-                    target,
-                    relative,
-                )
-            raise ValueError(f"path is not a regular file or directory: {relative}")
-        except (OSError, UnicodeError, ValueError) as exc:
-            item = ItemRecord(
-                id=new_id("item"),
-                thread_id=thread.id,
-                turn_id=turn.id,
-                kind=ItemKind.FILE_READ,
-                status=ItemStatus.FAILED,
-                content={
-                    "path": raw_path,
-                    "source": "prompt_reference",
-                    "error": str(exc),
-                },
-                completed_at_ms=now_ms(),
-            )
-            return item, f"- @{raw_path}: unavailable ({exc})"
-
-    def _referenced_file_context_item(
-        self,
-        thread: ThreadRecord,
-        turn: TurnRecord,
-        target: Path,
-        relative: str,
-    ) -> tuple[ItemRecord, str]:
-        size = target.stat().st_size
-        with target.open("rb") as handle:
-            raw = handle.read(_MAX_CONTEXT_FILE_BYTES + 1)
-        if b"\x00" in raw:
-            raise UnicodeError(f"file appears to be binary: {relative}")
-        truncated = len(raw) > _MAX_CONTEXT_FILE_BYTES
-        text = raw[:_MAX_CONTEXT_FILE_BYTES].decode("utf-8", errors="replace")
-        item = ItemRecord(
-            id=new_id("item"),
-            thread_id=thread.id,
-            turn_id=turn.id,
-            kind=ItemKind.FILE_READ,
-            status=ItemStatus.COMPLETED,
-            content={
-                "path": relative,
-                "size": size,
-                "truncated": truncated,
-                "source": "prompt_reference",
-                "text": text,
-            },
-            completed_at_ms=now_ms(),
+        built = ctx.build_workspace_context(
+            scope, thread.id, turn.id, prompt,
         )
-        header = f"@{relative} ({size} bytes"
-        if truncated:
-            header += f", first {_MAX_CONTEXT_FILE_BYTES} bytes"
-        header += ")"
-        context_text = f"{header}\n<file path=\"{relative}\">\n{text}\n</file>"
-        return item, context_text
-
-    def _referenced_directory_context_item(
-        self,
-        thread: ThreadRecord,
-        turn: TurnRecord,
-        scope: WorkspaceScope,
-        relative: str,
-    ) -> tuple[ItemRecord, str]:
-        entries = scope.inspect(relative, max_entries=_MAX_WORKSPACE_MAP_ENTRIES)
-        payload_entries = [{"path": entry.path, "size": entry.size} for entry in entries]
-        item = ItemRecord(
-            id=new_id("item"),
-            thread_id=thread.id,
-            turn_id=turn.id,
-            kind=ItemKind.WORKSPACE_INSPECT,
-            status=ItemStatus.COMPLETED,
-            content={
-                "path": relative,
-                "entries": payload_entries,
-                "source": "prompt_reference",
-            },
-            completed_at_ms=now_ms(),
+        return WorkspaceContext(
+            text=built.text,
+            items=built.items,
         )
-        lines = [f"@{relative}/ directory listing:"]
-        for entry in entries:
-            lines.append(f"- {entry.path} ({entry.size} bytes)")
-        if len(entries) >= _MAX_WORKSPACE_MAP_ENTRIES:
-            lines.append(f"- ... capped at {_MAX_WORKSPACE_MAP_ENTRIES} entries")
-        return item, "\n".join(lines)
 
     def _find_pending_command(self, thread: ThreadRecord, item_id: str) -> ItemRecord:
         return self._find_pending_item(
@@ -1125,6 +1123,52 @@ class AgentRuntime:
             kind=ItemKind.COMMAND,
             missing_message="command proposal not found",
             wrong_kind_message="item is not a command proposal",
+        )
+
+    def _find_task_item(
+        self,
+        thread: ThreadRecord,
+        item_id: str,
+    ) -> ItemRecord:
+        item = self._find_latest_item_payload(thread, item_id)
+        if item is None:
+            raise ValueError(f"task item not found: {item_id}")
+        if item.get("kind") != ItemKind.TASK.value:
+            raise ValueError(f"item is not a task: {item_id}")
+        raw_content = item.get("content")
+        content = dict(raw_content) if isinstance(raw_content, dict) else {}
+        created_at_ms = item.get("created_at_ms")
+        if not isinstance(created_at_ms, int):
+            created_at_ms = now_ms()
+        completed_raw = item.get("completed_at_ms")
+        completed_at_ms: int | None = completed_raw if isinstance(completed_raw, int) else None
+        return ItemRecord(
+            id=item_id,
+            thread_id=thread.id,
+            turn_id=str(item.get("turn_id")),
+            kind=ItemKind.TASK,
+            status=ItemStatus(item.get("status", ItemStatus.PENDING.value)),
+            content=content,
+            approval=ApprovalState.NONE,
+            created_at_ms=created_at_ms,
+            completed_at_ms=completed_at_ms,
+        )
+
+    def _item_record_from_view(
+        self,
+        item_view: Any,
+        thread: ThreadRecord,
+    ) -> ItemRecord:
+        return ItemRecord(
+            id=item_view.id,
+            thread_id=thread.id,
+            turn_id=item_view.turn_id,
+            kind=ItemKind(item_view.kind),
+            status=ItemStatus(item_view.status),
+            content=dict(item_view.content),
+            approval=ApprovalState(item_view.approval),
+            created_at_ms=item_view.created_at_ms,
+            completed_at_ms=item_view.completed_at_ms,
         )
 
     def _find_pending_file_write(self, thread: ThreadRecord, item_id: str) -> ItemRecord:
@@ -1430,7 +1474,7 @@ class AgentRuntime:
                         lines.append(f"error: {self._clip_context_field(error)}")
                     command_results.append("\n".join(lines))
             elif item.kind == "file_write":
-                lines: list[str] = []
+                file_lines: list[str] = []
                 path = item.content.get("path", "")
                 item_status = item.status
                 item_approval = item.approval
@@ -1439,27 +1483,21 @@ class AgentRuntime:
 
                 if is_pending:
                     action = "File edit" if operation == "replace" else "File write"
-                    lines.append(f"{action} proposal: {path}")
+                    file_lines.append(f"{action} proposal: {path}")
                     reason = item.content.get("reason")
                     if isinstance(reason, str) and reason:
-                        lines.append(f"reason: {reason}")
-                    diff = item.content.get("diff")
-                    if isinstance(diff, str) and diff:
-                        lines.append(f"diff:\n{self._clip_context_field(diff)}")
-                    scope_error = item.content.get("scope_error")
-                    if isinstance(scope_error, str) and scope_error:
-                        lines.append(f"scope_error: {scope_error}")
-                    pending_proposals.append("\n".join(lines))
+                        file_lines.append(f"reason: {reason}")
+                    pending_proposals.append("\n".join(file_lines))
                 else:
                     action = "File edit" if operation == "replace" else "File write"
-                    lines.append(f"{action} ({item_status}, approval={item_approval}): {path}")
+                    file_lines.append(f"{action} ({item_status}, approval={item_approval}): {path}")
                     bytes_written = item.content.get("bytes_written")
                     if isinstance(bytes_written, int):
-                        lines.append(f"bytes_written: {bytes_written}")
+                        file_lines.append(f"bytes_written: {bytes_written}")
                     scope_error = item.content.get("scope_error")
                     if isinstance(scope_error, str) and scope_error:
-                        lines.append(f"scope_error: {scope_error}")
-                    applied_changes.append("\n".join(lines))
+                        file_lines.append(f"scope_error: {scope_error}")
+                    applied_changes.append("\n".join(file_lines))
 
         if user_message:
             sections.append("User Message:")

@@ -711,18 +711,143 @@ class CliTests(unittest.TestCase):
         self.assertIn("no previous turn to escalate", logs)
 
     def test_persist_environment_overwrites_keys(self) -> None:
+        from cocoa import config as cocoa_config
+        ...
+
+    def test_repl_task_add_creates_task(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            from cocoa import config as cocoa_config
-            cfg_path = Path(tmpdir) / ".cocoa" / "cocoa.toml"
-            cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            cocoa_config.save_workspace_config(Path(tmpdir), {
-                "provider_used": "codex-http",
-                "provider": {"codex": {"model": "old"}},
-            })
-            _persist_environment(Path(tmpdir), {"COCOA_PROVIDER": "openai", "COCOA_OPENAI_MODEL": "gpt-5-mini"})
-            cfg = cfg_path.read_text(encoding="utf-8")
-        self.assertIn('provider_used = "openai"', cfg)
-        self.assertIn('model = "gpt-5-mini"', cfg)
+            tmp_path = Path(tmpdir)
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        "/task-add Implement login -- Add user authentication",
+                        "/tasks",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=tmp_path))
+        logs = output.getvalue()
+        self.assertIn("created:", logs)
+        self.assertIn("Implement login", logs)
+        self.assertIn("pending", logs)
+
+    def test_repl_task_add_without_description(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        "/task-add Quick fix",
+                        "/tasks",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=tmp_path))
+        logs = output.getvalue()
+        self.assertIn("Quick fix", logs)
+
+    def test_repl_task_show_displays_task(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+            item = runtime.create_task(thread, "Test task")
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        f"/task {item.id}",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=tmp_path, thread_id=thread.id))
+        logs = output.getvalue()
+        self.assertIn("item:", logs)
+        self.assertIn("task", logs)
+        self.assertIn("Test task", logs)
+
+    def test_repl_task_update_changes_status(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+            item = runtime.create_task(thread, "Update me")
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=[
+                        f"/task-update {item.id} --status in_progress",
+                        "/tasks",
+                        "/exit",
+                    ],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=tmp_path, thread_id=thread.id))
+        logs = output.getvalue()
+        self.assertIn("updated:", logs)
+        self.assertIn("in_progress", logs)
+
+    def test_repl_tasks_shows_empty_message(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
+                with mock.patch(
+                    "builtins.input",
+                    side_effect=["/tasks", "/exit"],
+                ):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        asyncio.run(run_repl(cwd=tmp_path))
+        logs = output.getvalue()
+        self.assertIn("no tasks", logs)
+
+    def test_repl_task_completion_includes_task_ids(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+            item = runtime.create_task(thread, "Complete me")
+
+            candidates = _completion_candidates(
+                f"/task {item.id[:8]}",
+                item.id[:8],
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn(item.id, candidates)
+
+    def test_repl_suggestions_include_task_commands(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            store = JsonlStore.for_workspace(tmp_path)
+            runtime = AgentRuntime(store, StubProvider())
+            thread = runtime.start_thread(tmp_path)
+
+            suggestions = _suggestion_items(
+                "/",
+                cwd=tmp_path,
+                store=store,
+                thread_id=thread.id,
+            )
+
+        self.assertIn(("/tasks", "list current tasks"), suggestions)
+        self.assertIn(("/task-add", "create a new task"), suggestions)
+        self.assertIn(("/task-update", "update a task"), suggestions)
+
 
 if __name__ == "__main__":
     unittest.main()

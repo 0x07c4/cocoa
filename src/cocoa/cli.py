@@ -10,7 +10,7 @@ import subprocess
 import sys
 import textwrap
 import unicodedata
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -50,6 +50,10 @@ _REPL_COMMANDS = (
     "/set",
     "/show",
     "/status",
+    "/task",
+    "/task-add",
+    "/task-update",
+    "/tasks",
     "/usage",
 )
 
@@ -79,6 +83,10 @@ _REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
     "/set": "set session variable",
     "/show": "show turn or item",
     "/status": "show session status",
+    "/task": "show task details",
+    "/task-add": "create a new task",
+    "/task-update": "update a task",
+    "/tasks": "list current tasks",
     "/usage": "show model usage",
 }
 
@@ -105,6 +113,9 @@ _COMMANDS_EXPECTING_ARGUMENTS = {
     "/run",
     "/set",
     "/show",
+    "/task",
+    "/task-add",
+    "/task-update",
 }
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -319,13 +330,15 @@ def _resolve_runtime_from_env(cwd: Path, overrides: Mapping[str, str]) -> tuple[
     env = _effective_session_environment(cwd, overrides)
     provider_env, _ = _provider_environment_for_mode(env)
     store = JsonlStore.for_workspace(cwd)
+    config = cocoa_config.resolve_config(cwd, overrides)
+    budget = config.get("budget", {}) if isinstance(config.get("budget"), dict) else {}
     try:
         provider_status = _resolve_provider_status_for_env(provider_env)
         provider = provider_from_env(provider_env)
     except ProviderConfigurationError as exc:
         provider_status = f"not configured ({exc})"
         provider = StubProvider()
-    return AgentRuntime(store=store, provider=provider), store, provider_status
+    return AgentRuntime(store=store, provider=provider, budget=budget), store, provider_status
 
 
 def resolve_cwd(raw: str) -> Path:
@@ -341,7 +354,9 @@ def make_runtime(cwd: Path) -> tuple[AgentRuntime, JsonlStore]:
     store = JsonlStore.for_workspace(cwd)
     env = _effective_environment(cwd)
     provider_env, _ = _provider_environment_for_mode(env)
-    return AgentRuntime(store=store, provider=provider_from_env(provider_env)), store
+    config = cocoa_config.resolve_config(cwd, {})
+    budget = config.get("budget", {}) if isinstance(config.get("budget"), dict) else {}
+    return AgentRuntime(store=store, provider=provider_from_env(provider_env), budget=budget), store
 
 
 def print_doctor(cwd: Path) -> None:
@@ -434,10 +449,13 @@ def _print_usage(store: JsonlStore, thread_id: str) -> None:
             f"  {turn_id}\t{mode}\t{provider}{model_text}\t"
             f"{estimated}in={input_tokens or 0} out={output_tokens or 0}"
         )
+        warning = record.get("budget_warning")
+        if isinstance(warning, str) and warning:
+            print(f"    warning: {warning}")
     print(f"total\tin={total_input} out={total_output}")
 
 
-def _usage_records(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _usage_records(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     routing_by_turn: dict[str, dict[str, Any]] = {}
     records: list[dict[str, Any]] = []
     for row in rows:
@@ -540,6 +558,26 @@ def _completion_candidates(
         return _workspace_path_completion_candidates(cwd, text)
     if command == "/run":
         return _run_completion_candidates(cwd, line, text)
+    if command == "/task":
+        return [
+            candidate
+            for candidate in _task_item_completion_candidates(store, thread_id)
+            if candidate.startswith(text)
+        ]
+    if command == "/task-update":
+        parts = line.split()
+        if len(parts) <= 2:
+            return [
+                candidate
+                for candidate in _task_item_completion_candidates(store, thread_id)
+                if candidate.startswith(text)
+            ]
+        if len(parts) == 3 and not line.endswith(" "):
+            return []
+        if "--status" in parts:
+            status_values = ["pending", "in_progress", "completed"]
+            return [s for s in status_values if s.startswith(text)]
+        return ["--status"]
     return []
 
 
@@ -648,6 +686,13 @@ def _completion_description(line: str, candidate: str) -> str:
         if not parts or (len(parts) == 1 and not raw.endswith(" ")):
             return "shell command"
         return "workspace path"
+    if command == "/task":
+        return "task projection"
+    if command == "/task-update":
+        parts = line.split()
+        if len(parts) <= 2:
+            return "task id"
+        return "task status"
     return ""
 
 
@@ -732,6 +777,22 @@ def _pending_item_completion_candidates(
                 and item.status == "pending"
                 and item.approval == "requested"
             ):
+                candidates.append(item.id)
+    return candidates
+
+
+def _task_item_completion_candidates(
+    store: JsonlStore,
+    thread_id: str,
+) -> list[str]:
+    try:
+        view = load_thread_view(store, thread_id)
+    except ValueError:
+        return []
+    candidates: list[str] = []
+    for turn in view.turns:
+        for item in turn.items:
+            if item.kind == "task":
                 candidates.append(item.id)
     return candidates
 
@@ -1649,6 +1710,12 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("/history            show turns in current thread")
                 print("/usage              show model usage in current thread")
                 print("/show <id|last>     show a turn or item projection")
+                print("/tasks              list current tasks")
+                print("/task <id>          show task details")
+                print("/task-add <subject> -- [description]")
+                print("                    create a new task")
+                print("/task-update <id> --status <status>")
+                print("                    update task status")
                 print("/pending            show pending proposals")
                 print("/diff <item_id>     show pending file write diff")
                 print("/escalate last      escalate previous turn to reviewer/planner")
@@ -1798,6 +1865,76 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     continue
                 print_show(store, thread.id, target)
                 continue
+            if line == "/tasks":
+                tasks = runtime.list_tasks(thread)
+                if not tasks:
+                    print("no tasks")
+                    continue
+                print("tasks:")
+                for t in tasks:
+                    t_status = t.content.get("status", "unknown")
+                    t_subject = t.content.get("subject", "-")
+                    print(f"  {t.id}\t{t_status}\t{t_subject}")
+                continue
+            if line == "/task":
+                print("usage: /task <id>")
+                continue
+            if line.startswith("/task "):
+                _, _, target = line.partition(" ")
+                target = target.strip()
+                if not target:
+                    print("usage: /task <id>")
+                    continue
+                view = load_thread_view(store, thread.id)
+                item = view.find_item(target)
+                if item is None or item.kind != "task":
+                    print(f"task not found: {target}")
+                    continue
+                _print_item_view(item)
+                continue
+            if line.startswith("/task-add "):
+                raw = line.removeprefix("/task-add ").strip()
+                if " -- " in raw:
+                    subject, description = raw.split(" -- ", 1)
+                else:
+                    subject = raw
+                    description = ""
+                subject = subject.strip()
+                if not subject:
+                    print("usage: /task-add <subject> -- [description]")
+                    continue
+                try:
+                    created_task = runtime.create_task(thread, subject, description=description)
+                except ValueError as exc:
+                    print(str(exc))
+                    continue
+                print(f"created: {created_task.id}")
+                print(f"subject: {subject}")
+                continue
+            if line.startswith("/task-update "):
+                raw = line.removeprefix("/task-update ").strip()
+                parts = shlex.split(raw)
+                if not parts:
+                    print("usage: /task-update <id> --status <status>")
+                    continue
+                item_id = parts[0]
+                status: str | None = None
+                for i, part in enumerate(parts[1:], 1):
+                    if part == "--status" and i + 1 < len(parts):
+                        status = parts[i + 1]
+                        break
+                if not status:
+                    print("usage: /task-update <id> --status <status>")
+                    print("available: pending | in_progress | completed")
+                    continue
+                try:
+                    updated_task = runtime.update_task(thread, item_id, status=status)
+                except ValueError as exc:
+                    print(str(exc))
+                    continue
+                print(f"updated: {updated_task.id}")
+                print(f"status: {status}")
+                continue
             if line == "/diff" or line.startswith("/diff "):
                 _, _, target = line.partition(" ")
                 target = target.strip()
@@ -1831,21 +1968,21 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print("usage: /apply <item_id>")
                     continue
                 try:
-                    item = runtime.apply_proposed_file_write(thread, target)
+                    applied_item = runtime.apply_proposed_file_write(thread, target)
                 except ValueError as exc:
                     print(f"cannot apply: {exc}")
                     try:
-                        view = load_thread_view(store, thread.id)
+                        apply_view = load_thread_view(store, thread.id)
                     except ValueError:
-                        view = None
-                    if view is not None:
-                        pending_item = view.find_item(target)
+                        apply_view = None
+                    if apply_view is not None:
+                        pending_item = apply_view.find_item(target)
                         if pending_item is not None and pending_item.kind == "file_write":
                             _print_file_proposal_recovery_hint(pending_item)
                             print(f"reject: /reject {pending_item.id}")
                     continue
-                path = item.content.get("path")
-                bytes_written = item.content.get("bytes_written")
+                path = applied_item.content.get("path")
+                bytes_written = applied_item.content.get("bytes_written")
                 print(f"applied: {path}")
                 if isinstance(bytes_written, int):
                     print(f"bytes_written: {bytes_written}")
@@ -1857,14 +1994,14 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print("usage: /reject <item_id>")
                     continue
                 try:
-                    item = runtime.reject_pending_item(thread, target)
+                    rejected_item = runtime.reject_pending_item(thread, target)
                 except ValueError as exc:
                     print(str(exc))
                     continue
-                path = item.content.get("path")
-                command = item.content.get("command")
-                label = path if item.kind == ItemKind.FILE_WRITE else command
-                print(f"rejected: {item.id}")
+                path = rejected_item.content.get("path")
+                command_text = rejected_item.content.get("command")
+                label = path if rejected_item.kind == ItemKind.FILE_WRITE else command_text
+                print(f"rejected: {rejected_item.id}")
                 if isinstance(label, str) and label:
                     print(f"target: {label}")
                 continue
@@ -1889,7 +2026,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if mode != "premium":
                     print("hint: use /mode premium for Codex review")
                 try:
-                    result = await runtime.run_escalation_turn(
+                    escalation_result = await runtime.run_escalation_turn(
                         thread,
                         target="last",
                         routing=_routing_payload_for_env(env),
@@ -1897,7 +2034,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 except ValueError as exc:
                     print(str(exc))
                     continue
-                print(result.message)
+                print(escalation_result.message)
                 continue
             if line.startswith("/run "):
                 command = line.removeprefix("/run ").strip()
