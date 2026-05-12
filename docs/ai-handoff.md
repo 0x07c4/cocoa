@@ -102,6 +102,8 @@ Expected behavior:
 
 ### Phase 2: Session Engine Boundary
 
+Status: `implemented (Tasks 7-10)`
+
 Objective: extract a `SessionEngine` layer inspired by `QueryEngine.ts`.
 
 Expected behavior:
@@ -164,7 +166,7 @@ Expected behavior:
 
 ### Task 0: Baseline Orientation
 
-Status: `pending`
+Status: `completed`
 
 Scope:
 
@@ -335,6 +337,150 @@ Acceptance:
 
 - default behavior unchanged when no budget is configured
 - warning is event-backed and testable
+
+### Task 7: Add SessionEngine Wrapper
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/session.py` (new)
+- `tests/test_session.py` (new)
+
+Implementation:
+
+- add a small `SessionEngine` class that owns:
+  - `runtime: AgentRuntime`
+  - `store: JsonlStore`
+  - `thread: ThreadRecord`
+  - `cwd: Path`
+  - `overrides` dict for session env overrides
+  - internal `ShellTool(ConsoleApprovalPrompter())`
+- constructors or helpers for:
+  - starting a new session with a title
+  - resuming an existing thread id
+  - set/clear session overrides (rebuilds runtime)
+  - env/mode/provider-status introspection
+- expose thin methods that delegate to the existing runtime:
+  - `run_user_turn(prompt)` — one-shot
+  - `run_user_turn_with_result(prompt)` — returns `UserTurnResult`
+  - `run_escalation_turn()` — delegates to runtime with built-in routing
+  - `run_shell_turn(command)` — uses internal shell
+  - `run_proposed_command(item_id)` — accept proposal
+  - `apply_proposed_file_write(item_id)` — apply file write
+  - `reject_pending_item(item_id)` — reject proposal
+  - `create_task(...)`
+  - `update_task(...)`
+  - `list_tasks()`
+
+Acceptance:
+
+- no behavior change in `AgentRuntime`
+- no CLI behavior change yet
+- tests prove a session can start, resume, run a user turn, create/list/update
+  tasks, and delegate proposal apply/reject through the existing runtime
+- thread id and log path remain the same as before
+
+### Task 8: Route Ask Through SessionEngine
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/cli.py`
+- `tests/test_cli.py`
+- `tests/test_session.py` if needed
+
+Implementation:
+
+- update `run_ask()` to create/resume a `SessionEngine` instead of directly
+  juggling `runtime`, `store`, and `thread`
+- keep output exactly the same:
+  - context items
+  - model message
+  - proposals
+  - thread id
+  - log path
+- leave REPL unchanged in this task
+
+Acceptance:
+
+- existing `ask` behavior and tests still pass
+- `run_ask()` no longer calls `runtime.start_thread()` or
+  `runtime.resume_thread()` directly
+- no provider/config/routing behavior changes
+
+### Task 9: Route REPL Runtime Actions Through SessionEngine
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/cli.py`
+- `tests/test_cli.py`
+- `tests/test_session.py` if needed
+
+Implementation:
+
+- update REPL runtime actions to call `SessionEngine` methods:
+  - normal prompt turn
+  - `/escalate`
+  - `/run`
+  - `/accept`
+  - `/apply`
+  - `/reject`
+  - `/tasks`
+  - `/task-add`
+  - `/task-update`
+- keep projection-only commands reading from the same store:
+  - `/history`
+  - `/show`
+  - `/pending`
+  - `/diff`
+  - `/usage`
+- keep provider reload behavior explicit: when `/mode`, `/set`, or
+  `/configure` rebuilds provider/runtime, rebuild the session wrapper around
+  the same thread id instead of creating a new thread.
+
+Acceptance:
+
+- existing REPL tests still pass
+- provider reconfiguration keeps the current thread
+- no direct REPL calls to `runtime.run_user_turn_with_result`,
+  `runtime.run_escalation_turn`, `runtime.run_shell_turn`,
+  `runtime.run_proposed_command`, `runtime.apply_proposed_file_write`,
+  `runtime.reject_pending_item`, `runtime.create_task`,
+  `runtime.update_task`, or `runtime.list_tasks`
+- approval and file apply behavior remains unchanged
+
+### Task 10: Remove CLI Lifecycle Ownership
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/cli.py`
+- `src/cocoa/session.py`
+- `docs/architecture.md`
+- `tests/test_cli.py`
+- `tests/test_session.py`
+
+Implementation:
+
+- reduce `_resolve_runtime_from_env()` / `make_runtime()` usage or rename them
+  so they produce a `SessionEngine` where appropriate
+- keep CLI responsible for parsing, printing, completion, and config commands
+- keep `SessionEngine` responsible for active thread lifecycle and runtime
+  delegation
+- update architecture docs to mark the initial SessionEngine boundary as done
+
+Acceptance:
+
+- `cli.py` no longer owns active thread lifecycle outside session construction
+- `AgentRuntime` remains the event/proposal/approval owner
+- `SessionEngine` does not introduce a second source of truth
+- `mypy src/cocoa` passes
+- `PYTHONPATH=src python -m unittest discover -s tests -q` passes
 
 ## Constraints
 

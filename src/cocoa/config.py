@@ -310,6 +310,63 @@ def resolve_model_mode(config: dict[str, Any]) -> str:
     return "balanced"
 
 
+def resolve_model_mode_from_env(env: Mapping[str, str]) -> str:
+    raw = env.get(_MODEL_MODE_ENV, "").strip().lower()
+    if raw in _MODEL_MODES:
+        return raw
+    return "balanced"
+
+
+def provider_environment_for_mode(env: Mapping[str, str]) -> tuple[dict[str, str], bool]:
+    mode = resolve_model_mode_from_env(env)
+    prefix = f"COCOA_{mode.upper()}_"
+    routed = dict(env)
+    profile_used = False
+
+    provider = env.get(f"{prefix}PROVIDER")
+    if provider:
+        routed["COCOA_PROVIDER"] = provider
+        profile_used = True
+    elif any(key.startswith(f"{prefix}OPENAI_") for key in env):
+        routed["COCOA_PROVIDER"] = "openai"
+        profile_used = True
+    elif any(key.startswith(f"{prefix}CODEX_") for key in env):
+        routed["COCOA_PROVIDER"] = "codex-http"
+        profile_used = True
+
+    key_map = {
+        "OPENAI_API_KEY": "COCOA_OPENAI_API_KEY",
+        "OPENAI_MODEL": "COCOA_OPENAI_MODEL",
+        "OPENAI_BASE_URL": "COCOA_OPENAI_BASE_URL",
+        "OPENAI_TIMEOUT_SECONDS": "COCOA_OPENAI_TIMEOUT_SECONDS",
+        "OPENAI_TEMPERATURE": "COCOA_OPENAI_TEMPERATURE",
+        "OPENAI_MAX_TOKENS": "COCOA_OPENAI_MAX_TOKENS",
+        "CODEX_API_KEY": "COCOA_CODEX_API_KEY",
+        "CODEX_MODEL": "COCOA_CODEX_MODEL",
+        "CODEX_BASE_URL": "COCOA_CODEX_BASE_URL",
+        "CODEX_HOME": "COCOA_CODEX_HOME",
+        "CODEX_TIMEOUT_SECONDS": "COCOA_CODEX_TIMEOUT_SECONDS",
+        "CODEX_TEMPERATURE": "COCOA_CODEX_TEMPERATURE",
+        "CODEX_MAX_TOKENS": "COCOA_CODEX_MAX_TOKENS",
+    }
+    for source_suffix, target_key in key_map.items():
+        source_key = f"{prefix}{source_suffix}"
+        if source_key in env:
+            routed[target_key] = env[source_key]
+            profile_used = True
+
+    generic_model = env.get(f"{prefix}MODEL")
+    if generic_model:
+        provider_name = routed.get("COCOA_PROVIDER", "").lower()
+        if provider_name in {"codex", "codex-http", "codex-responses", "openai-codex"}:
+            routed["COCOA_CODEX_MODEL"] = generic_model
+        else:
+            routed["COCOA_OPENAI_MODEL"] = generic_model
+        profile_used = True
+
+    return routed, profile_used
+
+
 def to_env_mapping(config: dict[str, Any], mode: str) -> dict[str, str]:
     env: dict[str, str] = {}
 

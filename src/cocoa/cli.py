@@ -21,12 +21,16 @@ from .projection import ItemView, TurnView, load_thread_view
 from .providers import (
     ProviderConfigurationError,
     StubProvider,
+    is_provider_configured,
     provider_from_env,
     provider_name_from_env,
+    resolve_provider_model,
+    resolve_provider_status,
+    resolve_routed_provider_status,
 )
 from .runtime import AgentRuntime
+from .session import SessionEngine
 from .store import JsonlStore
-from .tools import ConsoleApprovalPrompter, ShellTool
 from .workspace import WorkspaceScope
 
 _REPL_COMMANDS = (
@@ -266,60 +270,11 @@ def _effective_session_environment(
 
 
 def _resolve_model_mode(env: Mapping[str, str]) -> str:
-    raw = env.get(_MODEL_MODE_ENV, "").strip().lower()
-    if raw in _MODEL_MODES:
-        return raw
-    return "balanced"
+    return cocoa_config.resolve_model_mode_from_env(env)
 
 
 def _provider_environment_for_mode(env: Mapping[str, str]) -> tuple[dict[str, str], bool]:
-    mode = _resolve_model_mode(env)
-    prefix = f"COCOA_{mode.upper()}_"
-    routed = dict(env)
-    profile_used = False
-
-    provider = env.get(f"{prefix}PROVIDER")
-    if provider:
-        routed["COCOA_PROVIDER"] = provider
-        profile_used = True
-    elif any(key.startswith(f"{prefix}OPENAI_") for key in env):
-        routed["COCOA_PROVIDER"] = "openai"
-        profile_used = True
-    elif any(key.startswith(f"{prefix}CODEX_") for key in env):
-        routed["COCOA_PROVIDER"] = "codex-http"
-        profile_used = True
-
-    key_map = {
-        "OPENAI_API_KEY": "COCOA_OPENAI_API_KEY",
-        "OPENAI_MODEL": "COCOA_OPENAI_MODEL",
-        "OPENAI_BASE_URL": "COCOA_OPENAI_BASE_URL",
-        "OPENAI_TIMEOUT_SECONDS": "COCOA_OPENAI_TIMEOUT_SECONDS",
-        "OPENAI_TEMPERATURE": "COCOA_OPENAI_TEMPERATURE",
-        "OPENAI_MAX_TOKENS": "COCOA_OPENAI_MAX_TOKENS",
-        "CODEX_API_KEY": "COCOA_CODEX_API_KEY",
-        "CODEX_MODEL": "COCOA_CODEX_MODEL",
-        "CODEX_BASE_URL": "COCOA_CODEX_BASE_URL",
-        "CODEX_HOME": "COCOA_CODEX_HOME",
-        "CODEX_TIMEOUT_SECONDS": "COCOA_CODEX_TIMEOUT_SECONDS",
-        "CODEX_TEMPERATURE": "COCOA_CODEX_TEMPERATURE",
-        "CODEX_MAX_TOKENS": "COCOA_CODEX_MAX_TOKENS",
-    }
-    for source_suffix, target_key in key_map.items():
-        source_key = f"{prefix}{source_suffix}"
-        if source_key in env:
-            routed[target_key] = env[source_key]
-            profile_used = True
-
-    generic_model = env.get(f"{prefix}MODEL")
-    if generic_model:
-        provider_name = routed.get("COCOA_PROVIDER", "").lower()
-        if provider_name in {"codex", "codex-http", "codex-responses", "openai-codex"}:
-            routed["COCOA_CODEX_MODEL"] = generic_model
-        else:
-            routed["COCOA_OPENAI_MODEL"] = generic_model
-        profile_used = True
-
-    return routed, profile_used
+    return cocoa_config.provider_environment_for_mode(env)
 
 
 def _resolve_runtime_from_env(cwd: Path, overrides: Mapping[str, str]) -> tuple[
@@ -1317,21 +1272,16 @@ def _install_repl_completion(
 
 
 def _resolve_provider_status(env: Mapping[str, str] | None = None) -> str:
-    # keep backwards compatibility for callers that pass no env
     source = dict(os.environ) if env is None else dict(env)
-    return _resolve_provider_status_for_env(source)
+    return resolve_provider_status(source)
 
 
 def _resolve_provider_status_for_env(env: Mapping[str, str]) -> str:
-    try:
-        return provider_name_from_env(env)
-    except ProviderConfigurationError as exc:
-        return f"not configured ({exc})"
+    return resolve_provider_status(env)
 
 
 def _resolve_routed_provider_status_for_env(env: Mapping[str, str]) -> str:
-    provider_env, _ = _provider_environment_for_mode(env)
-    return _resolve_provider_status_for_env(provider_env)
+    return resolve_routed_provider_status(env)
 
 
 def _resolve_provider_model(env: Mapping[str, str] | None = None) -> str:
@@ -1345,13 +1295,7 @@ def _resolve_provider_model(env: Mapping[str, str] | None = None) -> str:
 
 
 def _resolve_provider_model_for_env(env: Mapping[str, str]) -> str:
-    status = _resolve_routed_provider_status_for_env(env)
-    if status == "stub" or status.startswith("not configured ("):
-        return "unknown"
-    index = status.find(":")
-    if index >= 0:
-        return status[index + 1 :]
-    return "default"
+    return resolve_provider_model(env)
 
 
 def _is_provider_configured(env: Mapping[str, str] | None = None) -> bool:
@@ -1636,59 +1580,44 @@ def _print_proposals(proposals: tuple[ItemRecord, ...]) -> None:
 
 
 async def run_ask(cwd: Path, prompt: str, thread_id: str | None = None) -> None:
-    runtime, store = make_runtime(cwd)
-    env = _effective_environment(cwd)
+    session = SessionEngine(cwd)
     if thread_id is None:
-        thread = runtime.start_thread(cwd, title=prompt[:80])
+        session.start_thread(title=prompt[:80])
     else:
-        thread = runtime.resume_thread(thread_id)
-    result = await runtime.run_user_turn_with_result(
-        thread,
-        prompt,
-        routing=_routing_payload_for_env(env),
-    )
+        session.resume_thread(thread_id)
+    result = await session.run_user_turn_with_result(prompt)
     _print_context_items(result.context_items)
     print(result.message)
     _print_proposals(result.proposals)
     print()
-    print(f"thread: {thread.id}")
-    print(f"log: {store.thread_path(thread.id)}")
+    print(f"thread: {session.thread.id}")
+    print(f"log: {session.thread_path()}")
 
 
 async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
-    overrides: dict[str, str] = {}
-    runtime, store, provider_status = _resolve_runtime_from_env(cwd, overrides)
+    session = SessionEngine(cwd)
 
     def print_provider_status() -> None:
-        print(f"provider: {_resolve_routed_provider_status_for_env(_effective_session_environment(cwd, overrides))}")
+        print(f"provider: {session.provider_status_text()}")
 
-    def rebuild_runtime() -> None:
-        nonlocal runtime, provider_status
-        runtime, _, provider_status = _resolve_runtime_from_env(cwd, overrides)
-
-    def set_and_reload_env(key: str, value: str) -> None:
-        overrides[key] = value
-        rebuild_runtime()
-
-    env = _effective_session_environment(cwd, overrides)
+    env = session.current_env()
     if thread_id is None:
-        thread = runtime.start_thread(cwd, title="repl")
+        session.start_thread(title="repl")
     else:
-        thread = runtime.resume_thread(thread_id)
-    shell = ShellTool(ConsoleApprovalPrompter())
+        session.resume_thread(thread_id)
 
     print(f"cocoa {__version__}")
-    print(f"thread: {thread.id}")
-    print(f"provider: {provider_status}")
-    if not _is_provider_configured(env):
+    print(f"thread: {session.thread.id}")
+    print(f"provider: {session.provider_status}")
+    if not session.is_provider_configured():
         print("provider not ready, type /configure for setup, /help for commands")
     print("type /help for commands, /exit to quit")
 
-    repl_input = ReplInput(cwd, store, thread.id)
+    repl_input = ReplInput(cwd, session.store, session.thread.id)
     try:
         while True:
             try:
-                line = repl_input.read(provider_status).strip()
+                line = repl_input.read(session.provider_status).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -1734,14 +1663,14 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 _, _, raw_mode = line.partition(" ")
                 mode = raw_mode.strip().lower()
                 if not mode:
-                    print(f"mode: {_resolve_model_mode(env)}")
+                    print(f"mode: {session.resolved_mode()}")
                     print("available: " + " | ".join(_MODEL_MODES))
                     continue
                 if mode not in _MODEL_MODES:
                     print("usage: /mode cheap|balanced|premium|local")
                     continue
-                set_and_reload_env(_MODEL_MODE_ENV, mode)
-                env = _effective_session_environment(cwd, overrides)
+                session.set_override(_MODEL_MODE_ENV, mode)
+                env = session.current_env()
                 print(f"mode: {mode}")
                 print_provider_status()
                 continue
@@ -1763,9 +1692,8 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     if len(args) > 3:
                         cocoa_config.set_dotted(data, "provider.openai.base_url", args[3])
                     cocoa_config.save_workspace_config(cwd, data)
-                    overrides.clear()
-                    rebuild_runtime()
-                    env = _effective_session_environment(cwd, overrides)
+                    session.clear_overrides()
+                    env = session.current_env()
                     print("provider config persisted to .cocoa/cocoa.toml")
                     print_provider_status()
                     continue
@@ -1777,9 +1705,8 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                         if len(args) > 2:
                             cocoa_config.set_dotted(data, "provider.codex.api_key", args[2])
                     cocoa_config.save_workspace_config(cwd, data)
-                    overrides.clear()
-                    rebuild_runtime()
-                    env = _effective_session_environment(cwd, overrides)
+                    session.clear_overrides()
+                    env = session.current_env()
                     print("provider config persisted to .cocoa/cocoa.toml")
                     print_provider_status()
                     continue
@@ -1788,9 +1715,8 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     data.pop("provider_used", None)
                     data.pop("provider", None)
                     cocoa_config.save_workspace_config(cwd, data)
-                    overrides.clear()
-                    rebuild_runtime()
-                    env = _effective_session_environment(cwd, overrides)
+                    session.clear_overrides()
+                    env = session.current_env()
                     print("provider override cleared in workspace config")
                     continue
                 print("unknown /configure mode. use openai | codex-http | clear")
@@ -1823,16 +1749,15 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if not key:
                     print("missing variable name")
                     continue
-                set_and_reload_env(key, value)
-                env = _effective_session_environment(cwd, overrides)
+                session.set_override(key, value)
+                env = session.current_env()
                 if persist:
                     _persist_environment(cwd, {key: value})
-                print(
-                    f"{key} {'persisted and ' if persist else ''}set"
-                )
+                print(f"{key} {'persisted and ' if persist else ''}set")
                 print_provider_status()
                 continue
             if line == "/persist":
+                overrides = session.overrides
                 if not overrides:
                     print("no session overrides to persist")
                     continue
@@ -1842,20 +1767,22 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("session overrides persisted to .cocoa/cocoa.toml")
                 continue
             if line == "/status":
-                print(f"thread: {thread.id}")
+                print(f"thread: {session.thread.id}")
                 print(f"cwd: {cwd}")
-                print(f"log: {store.thread_path(thread.id)}")
-                print(f"mode: {_resolve_model_mode(env)}")
-                print(f"provider: {_resolve_routed_provider_status_for_env(env)}")
+                print(f"log: {session.thread_path()}")
+                print(f"mode: {session.resolved_mode()}")
+                print(f"provider: {session.provider_status_text()}")
                 continue
             if line == "/history":
-                print_history(store, thread.id)
+                print_history(session.store, session.thread.id)
                 continue
             if line == "/usage":
-                _print_usage(store, thread.id)
+                _print_usage(session.store, session.thread.id)
                 continue
             if line == "/pending":
-                _print_pending_proposals(_pending_proposal_views(store, thread.id))
+                _print_pending_proposals(
+                    _pending_proposal_views(session.store, session.thread.id)
+                )
                 continue
             if line == "/show" or line.startswith("/show "):
                 _, _, target = line.partition(" ")
@@ -1863,10 +1790,10 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if not target:
                     print("usage: /show <turn_id|item_id|last>")
                     continue
-                print_show(store, thread.id, target)
+                print_show(session.store, session.thread.id, target)
                 continue
             if line == "/tasks":
-                tasks = runtime.list_tasks(thread)
+                tasks = session.list_tasks()
                 if not tasks:
                     print("no tasks")
                     continue
@@ -1885,12 +1812,12 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if not target:
                     print("usage: /task <id>")
                     continue
-                view = load_thread_view(store, thread.id)
-                item = view.find_item(target)
-                if item is None or item.kind != "task":
+                view = load_thread_view(session.store, session.thread.id)
+                found_item = view.find_item(target)
+                if found_item is None or found_item.kind != "task":
                     print(f"task not found: {target}")
                     continue
-                _print_item_view(item)
+                _print_item_view(found_item)
                 continue
             if line.startswith("/task-add "):
                 raw = line.removeprefix("/task-add ").strip()
@@ -1904,7 +1831,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print("usage: /task-add <subject> -- [description]")
                     continue
                 try:
-                    created_task = runtime.create_task(thread, subject, description=description)
+                    created_task = session.create_task(subject, description=description)
                 except ValueError as exc:
                     print(str(exc))
                     continue
@@ -1928,7 +1855,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print("available: pending | in_progress | completed")
                     continue
                 try:
-                    updated_task = runtime.update_task(thread, item_id, status=status)
+                    updated_task = session.update_task(item_id, status=status)
                 except ValueError as exc:
                     print(str(exc))
                     continue
@@ -1941,7 +1868,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if not target:
                     print("usage: /diff <item_id>")
                     continue
-                _print_pending_diff(store, thread.id, target)
+                _print_pending_diff(session.store, session.thread.id, target)
                 continue
             if line == "/accept" or line.startswith("/accept "):
                 _, _, target = line.partition(" ")
@@ -1950,16 +1877,16 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print("usage: /accept <item_id>")
                     continue
                 try:
-                    result = await runtime.run_proposed_command(thread, target, shell)
+                    command_result = await session.run_proposed_command(target)
                 except ValueError as exc:
                     print(str(exc))
                     continue
-                if result.stdout:
-                    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-                if result.stderr:
-                    print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
-                if result.exit_code is not None:
-                    print(f"exit_code: {result.exit_code}")
+                if command_result.stdout:
+                    print(command_result.stdout, end="" if command_result.stdout.endswith("\n") else "\n")
+                if command_result.stderr:
+                    print(command_result.stderr, end="" if command_result.stderr.endswith("\n") else "\n")
+                if command_result.exit_code is not None:
+                    print(f"exit_code: {command_result.exit_code}")
                 continue
             if line == "/apply" or line.startswith("/apply "):
                 _, _, target = line.partition(" ")
@@ -1968,11 +1895,11 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print("usage: /apply <item_id>")
                     continue
                 try:
-                    applied_item = runtime.apply_proposed_file_write(thread, target)
+                    applied_item = session.apply_proposed_file_write(target)
                 except ValueError as exc:
                     print(f"cannot apply: {exc}")
                     try:
-                        apply_view = load_thread_view(store, thread.id)
+                        apply_view = load_thread_view(session.store, session.thread.id)
                     except ValueError:
                         apply_view = None
                     if apply_view is not None:
@@ -1994,7 +1921,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print("usage: /reject <item_id>")
                     continue
                 try:
-                    rejected_item = runtime.reject_pending_item(thread, target)
+                    rejected_item = session.reject_pending_item(target)
                 except ValueError as exc:
                     print(str(exc))
                     continue
@@ -2006,10 +1933,10 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print(f"target: {label}")
                 continue
             if line == "/provider":
-                print(f"provider: {_resolve_routed_provider_status_for_env(env)}")
+                print(f"provider: {session.provider_status_text()}")
                 continue
             if line == "/model":
-                print(f"model: {_resolve_provider_model_for_env(env)}")
+                print(f"model: {session.provider_model()}")
                 continue
             if line.startswith("/inspect"):
                 _, _, raw_path = line.partition(" ")
@@ -2021,16 +1948,12 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if target != "last":
                     print("usage: /escalate last")
                     continue
-                env = _effective_session_environment(cwd, overrides)
-                mode = _resolve_model_mode(env)
-                if mode != "premium":
+                env = session.current_env()
+                mode_result = session.resolved_mode()
+                if mode_result != "premium":
                     print("hint: use /mode premium for Codex review")
                 try:
-                    escalation_result = await runtime.run_escalation_turn(
-                        thread,
-                        target="last",
-                        routing=_routing_payload_for_env(env),
-                    )
+                    escalation_result = await session.run_escalation_turn()
                 except ValueError as exc:
                     print(str(exc))
                     continue
@@ -2041,7 +1964,7 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if not command:
                     print("missing command")
                     continue
-                shell_result = await runtime.run_shell_turn(thread, command, shell)
+                shell_result = await session.run_shell_turn(command)
                 if shell_result.stdout:
                     print(shell_result.stdout, end="" if shell_result.stdout.endswith("\n") else "\n")
                 if shell_result.stderr:
@@ -2053,17 +1976,13 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 print("unknown command. type /help for commands.")
                 continue
 
-            turn_result = await runtime.run_user_turn_with_result(
-                thread,
-                line,
-                routing=_routing_payload_for_env(env),
-            )
+            turn_result = await session.run_user_turn_with_result(line)
             _print_context_items(turn_result.context_items)
             print(turn_result.message)
             _print_proposals(turn_result.proposals)
     finally:
         repl_input.close()
-    print(f"log: {store.thread_path(thread.id)}")
+    print(f"log: {session.thread_path()}")
 
 
 def print_threads(cwd: Path) -> None:

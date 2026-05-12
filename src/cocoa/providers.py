@@ -1041,6 +1041,35 @@ def provider_name_from_env(env: Mapping[str, str] = os.environ) -> str:
     raise ProviderConfigurationError(f"unsupported provider: {provider}")
 
 
+def resolve_provider_status(env: Mapping[str, str]) -> str:
+    try:
+        return provider_name_from_env(env)
+    except ProviderConfigurationError as exc:
+        return f"not configured ({exc})"
+
+
+def resolve_routed_provider_status(env: Mapping[str, str]) -> str:
+    from .config import provider_environment_for_mode
+
+    provider_env, _ = provider_environment_for_mode(env)
+    return resolve_provider_status(provider_env)
+
+
+def resolve_provider_model(env: Mapping[str, str]) -> str:
+    status = resolve_routed_provider_status(env)
+    if status == "stub" or status.startswith("not configured ("):
+        return "unknown"
+    index = status.find(":")
+    if index >= 0:
+        return status[index + 1 :]
+    return "default"
+
+
+def is_provider_configured(env: Mapping[str, str]) -> bool:
+    status = resolve_routed_provider_status(env)
+    return status != "stub" and not status.startswith("not configured (")
+
+
 class StubProvider:
     async def complete(self, request: ProviderRequest) -> ProviderResponse:
         lines = [

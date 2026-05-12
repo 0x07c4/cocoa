@@ -133,18 +133,18 @@ The runtime should keep working if the provider changes.
 
 ## Session Engine Boundary
 
-The CLI should remain a projection and controller. Long-lived conversation
-state should move behind a session/query layer similar in role to
-`claude-code-run`'s `QueryEngine`, adapted to `cocoa` primitives:
+The CLI remains a projection and controller. Long-lived conversation state
+is owned by `SessionEngine` (`src/cocoa/session.py`), which is the layer
+between the CLI and `AgentRuntime`:
 
 - owns the active thread, provider, store, routing overrides, and per-turn
   context
 - calls `AgentRuntime` for event creation and side-effect boundaries
 - exposes methods for user turns, escalation, manual commands, proposals, and
-  future task operations
+  task operations
 - keeps `cli.py` from accumulating lifecycle logic
 
-This boundary should not weaken the append-only event model. The session layer
+This boundary does not weaken the append-only event model. The session layer
 coordinates a turn; it does not become a second source of truth.
 
 ## Cost-Aware Routing Boundary
