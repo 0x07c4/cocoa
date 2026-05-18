@@ -559,19 +559,6 @@ def _completion_description(line: str, candidate: str) -> str:
         return "last turn escalation to reviewer"
     if command == "/reject":
         return "pending proposal"
-    if command == "/run":
-        raw = line.partition(" ")[2]
-        parts = raw.split()
-        if not parts or (len(parts) == 1 and not raw.endswith(" ")):
-            return "shell command"
-        return "workspace path"
-    if command == "/task":
-        return "task projection"
-    if command == "/task-update":
-        parts = line.split()
-        if len(parts) <= 2:
-            return "task id"
-        return "task status"
     return ""
 
 
@@ -1301,8 +1288,8 @@ def _print_provider_config_help() -> None:
     print("# Codex HTTP (if logged in ChatGPT)")
     print("/configure codex-http [model]")
     print("")
-    print("# Session override")
-    print("/set --persist KEY VALUE")
+    print("# Clear workspace config")
+    print("/configure clear")
 
 
 def _print_context_items(items: tuple[ItemRecord, ...]) -> None:

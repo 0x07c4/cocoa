@@ -61,7 +61,7 @@ PYTHONPATH=src python -m cocoa repl
 - `/reject <item_id>`（拒绝 pending command/file write proposal）
 - `/exit` 或 `/quit`（退出 REPL）
 
-`/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
+`/configure` 会把配置落盘到当前工作区的 `.cocoa/cocoa.toml`，后续启动会自动读取。
 每一轮会自动附带一个轻量 workspace file map；输入里出现 `@path` 时，cocoa 会在
 调用 provider 前读取对应工作区文件或目录，并记录为 `FILE_READ` /
 `WORKSPACE_INSPECT` item。例如：

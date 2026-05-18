@@ -67,9 +67,10 @@ that reconstructs:
 - latest item state per item id
 - turn-scoped errors
 
-The first CLI projection commands are `/history` and `/show <id|last>`. Future
-TUI/editor surfaces should read the same projection layer instead of inventing a
-separate session state.
+The projection layer still exists internally in `session.py` and `projection.py`.
+The public REPL no longer exposes `/history` or `/show` directly; future
+TUI/editor surfaces should consume the same projection layer instead of
+inventing a separate session state.
 
 ## Context Builder Boundary
 
