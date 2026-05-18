@@ -40,6 +40,7 @@ class ToolRegistryTests(unittest.TestCase):
             self.assertIsInstance(tool.side_effect, bool)
             self.assertIsInstance(tool.workspace_scope_required, bool)
             self.assertIsInstance(tool.requires_approval, bool)
+            self.assertIsInstance(tool.path_required, bool)
             self.assertTrue(tool.name)
             self.assertTrue(tool.description)
 
@@ -73,6 +74,12 @@ class ToolRegistryTests(unittest.TestCase):
                 self.assertTrue(tool.workspace_scope_required)
                 self.assertFalse(tool.side_effect)
                 self.assertFalse(tool.requires_approval)
+        file_read_tool = next(t for t in BUILTIN_TOOLS if t.name == "file_read")
+        self.assertTrue(file_read_tool.path_required)
+        workspace_inspect_tool = next(
+            t for t in BUILTIN_TOOLS if t.name == "workspace_inspect"
+        )
+        self.assertFalse(workspace_inspect_tool.path_required)
 
     def test_task_create_is_side_effect(self) -> None:
         tool = next(t for t in BUILTIN_TOOLS if t.name == "task_create")
@@ -90,6 +97,7 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertFalse(tool.read_only)
         self.assertTrue(tool.workspace_scope_required)
         self.assertTrue(tool.requires_approval)
+        self.assertTrue(tool.path_required)
 
     def test_runtime_lists_registered_tools(self) -> None:
         from tempfile import TemporaryDirectory
@@ -171,6 +179,12 @@ class ToolPermissionPolicyTests(unittest.TestCase):
             "file_read", path="missing.txt", scope=self._scope
         )
         self.assertEqual(result.decision, Permission.ALLOW)
+
+    def test_file_read_rejected_no_path(self) -> None:
+        result = self._policy.check_tool_call(
+            "file_read", scope=self._scope
+        )
+        self.assertEqual(result.decision, Permission.REJECT)
 
     def test_workspace_inspect_allowed(self) -> None:
         result = self._policy.check_tool_call(

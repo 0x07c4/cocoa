@@ -51,6 +51,7 @@ class ToolDescriptor:
     side_effect: bool = False
     workspace_scope_required: bool = False
     requires_approval: bool = False
+    path_required: bool = False
 
 
 class Permission(Enum):
@@ -93,6 +94,11 @@ class ToolPermissionPolicy:
                     Permission.REJECT,
                     f"{tool_name} requires workspace scope but none provided",
                 )
+            if tool.path_required and path is None:
+                return PermissionResult(
+                    Permission.REJECT,
+                    f"{tool_name} requires a path argument",
+                )
             if path is not None:
                 try:
                     scope.resolve(path)
@@ -124,6 +130,7 @@ BUILTIN_TOOLS: tuple[ToolDescriptor, ...] = (
         description="Read the content of a file inside the workspace scope.",
         read_only=True,
         workspace_scope_required=True,
+        path_required=True,
     ),
     ToolDescriptor(
         name="shell_command",
@@ -137,6 +144,7 @@ BUILTIN_TOOLS: tuple[ToolDescriptor, ...] = (
         side_effect=True,
         workspace_scope_required=True,
         requires_approval=True,
+        path_required=True,
     ),
     ToolDescriptor(
         name="file_edit",
@@ -144,6 +152,7 @@ BUILTIN_TOOLS: tuple[ToolDescriptor, ...] = (
         side_effect=True,
         workspace_scope_required=True,
         requires_approval=True,
+        path_required=True,
     ),
     ToolDescriptor(
         name="task_create",
