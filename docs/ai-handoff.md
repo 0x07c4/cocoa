@@ -625,37 +625,34 @@ Acceptance:
 
 ### Task 15: Add A Testable Permission Policy Layer
 
-Status: `pending`
+Status: `completed`
 
-Files:
+What was added:
 
-- `src/cocoa/tools.py`
-- `src/cocoa/workspace.py` if needed
-- `tests/test_tools.py`
-- `tests/test_workspace.py` if needed
+- `Permission` enum in `tools.py` with `ALLOW`, `REJECT`, `REQUIRES_APPROVAL`
+- `PermissionResult` frozen dataclass in `tools.py` with `decision` + `reason`
+- `ToolPermissionPolicy` class in `tools.py` that checks tool calls against:
+  - unknown tool name → REJECT
+  - side-effect or requires-approval tool → REQUIRES_APPROVAL
+  - workspace-scoped tool without scope → REJECT
+  - workspace-scoped tool with out-of-scope path → REJECT
+  - workspace-scoped tool with ignored path → REJECT
+  - workspace-scoped tool with valid/missing in-scope path → ALLOW
+  - read-only non-workspace tool → ALLOW
+- 17 tests in `test_tools.py` covering all acceptance criteria
+- Policy is data-only: instantiates from `ToolDescriptor` tuples, never
+  executes tools, never touches filesystem during evaluation
+- Existing proposal/apply gates unchanged
 
-Implementation:
+Read references first:
 
-- add a small permission policy helper for tool use decisions
-- policy must be data-only and testable; it should not execute tools
-- expected decisions:
-  - read-only workspace tools are allowed only for paths inside
-    `WorkspaceScope` and outside ignored paths
-  - missing paths may be reported as read failures, but must not escape scope
-  - command and write/edit tools require proposal/approval and must not be
-    auto-executed by policy
-  - unsupported tool names are rejected
-- keep existing proposal/apply gates unchanged
-
-Acceptance:
-
-- tests cover allowed in-scope reads
-- tests cover ignored paths and out-of-workspace paths
-- tests cover side-effect tools returning `requires_approval`
-- tests cover unknown tool rejection
-- no command/file write side effect happens from policy evaluation
-- `mypy src/cocoa` passes
-- `PYTHONPATH=src python -m unittest discover -s tests -q` passes
+- `/home/chikee/workspace/codex/codex-rs/core/src/config/permissions.rs`
+- `/home/chikee/workspace/codex/codex-rs/core/src/tools/handlers/mod.rs`
+- `/home/chikee/workspace/codex/codex-rs/core/src/tools/handlers/shell.rs`
+- `/home/chikee/workspace/codex/codex-rs/protocol/src/request_permissions.rs`
+- `/home/chikee/workspace/claude-code-run/src/Tool.ts`
+- `/home/chikee/workspace/claude-code-run/src/utils/permissions/permissions.ts`
+- `/home/chikee/workspace/claude-code-run/src/tools.ts`
 
 ### Task 16: Surface Tool Contract To Providers Without Auto-Execution
 

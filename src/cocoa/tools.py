@@ -4,8 +4,11 @@ import asyncio
 import os
 import signal
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Protocol
+
+from cocoa.workspace import WorkspaceScope
 
 
 class ApprovalPrompter(Protocol):
@@ -48,6 +51,65 @@ class ToolDescriptor:
     side_effect: bool = False
     workspace_scope_required: bool = False
     requires_approval: bool = False
+
+
+class Permission(Enum):
+    ALLOW = "allow"
+    REJECT = "reject"
+    REQUIRES_APPROVAL = "requires_approval"
+
+
+@dataclass(frozen=True)
+class PermissionResult:
+    decision: Permission
+    reason: str = ""
+
+
+class ToolPermissionPolicy:
+    def __init__(self, tools: tuple[ToolDescriptor, ...]) -> None:
+        self._tools_by_name = {t.name: t for t in tools}
+
+    def check_tool_call(
+        self,
+        tool_name: str,
+        path: str | None = None,
+        scope: WorkspaceScope | None = None,
+    ) -> PermissionResult:
+        tool = self._tools_by_name.get(tool_name)
+        if tool is None:
+            return PermissionResult(
+                Permission.REJECT, f"unknown tool: {tool_name}"
+            )
+
+        if tool.side_effect or tool.requires_approval:
+            return PermissionResult(
+                Permission.REQUIRES_APPROVAL,
+                f"{tool_name} requires user approval",
+            )
+
+        if tool.workspace_scope_required:
+            if scope is None:
+                return PermissionResult(
+                    Permission.REJECT,
+                    f"{tool_name} requires workspace scope but none provided",
+                )
+            if path is not None:
+                try:
+                    scope.resolve(path)
+                except ValueError:
+                    return PermissionResult(
+                        Permission.REJECT,
+                        f"path outside workspace: {path}",
+                    )
+                resolved = (scope.root / path).resolve()
+                relative = resolved.relative_to(scope.root).as_posix()
+                if scope.is_ignored(relative):
+                    return PermissionResult(
+                        Permission.REJECT,
+                        f"path is ignored: {relative}",
+                    )
+
+        return PermissionResult(Permission.ALLOW, f"{tool_name} is allowed")
 
 
 BUILTIN_TOOLS: tuple[ToolDescriptor, ...] = (

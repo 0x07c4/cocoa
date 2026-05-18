@@ -6,7 +6,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from cocoa.tools import BUILTIN_TOOLS, ToolDescriptor
+from cocoa.tools import (
+    BUILTIN_TOOLS,
+    Permission,
+    ToolDescriptor,
+    ToolPermissionPolicy,
+)
+from cocoa.workspace import WorkspaceScope
 
 
 class ToolRegistryTests(unittest.TestCase):
@@ -101,6 +107,117 @@ class ToolRegistryTests(unittest.TestCase):
 
             self.assertEqual(len(tools), len(BUILTIN_TOOLS))
             self.assertEqual(tools, BUILTIN_TOOLS)
+
+
+class ToolPermissionPolicyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = Path(__file__).resolve().parent / "_test_tmp_permissions"
+        self._tmpdir.mkdir(exist_ok=True)
+        (self._tmpdir / "readable.txt").write_text("hello")
+        (self._tmpdir / ".git").mkdir(exist_ok=True)
+        (self._tmpdir / ".git" / "HEAD").write_text("ref: main\n")
+        self._scope = WorkspaceScope(self._tmpdir)
+        self._policy = ToolPermissionPolicy(BUILTIN_TOOLS)
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_unknown_tool_is_rejected(self) -> None:
+        result = self._policy.check_tool_call("nonexistent_tool")
+        self.assertEqual(result.decision, Permission.REJECT)
+
+    def test_shell_command_requires_approval(self) -> None:
+        result = self._policy.check_tool_call("shell_command")
+        self.assertEqual(result.decision, Permission.REQUIRES_APPROVAL)
+
+    def test_file_write_requires_approval(self) -> None:
+        result = self._policy.check_tool_call("file_write")
+        self.assertEqual(result.decision, Permission.REQUIRES_APPROVAL)
+
+    def test_file_edit_requires_approval(self) -> None:
+        result = self._policy.check_tool_call("file_edit")
+        self.assertEqual(result.decision, Permission.REQUIRES_APPROVAL)
+
+    def test_task_create_requires_approval(self) -> None:
+        result = self._policy.check_tool_call("task_create")
+        self.assertEqual(result.decision, Permission.REQUIRES_APPROVAL)
+
+    def test_task_update_requires_approval(self) -> None:
+        result = self._policy.check_tool_call("task_update")
+        self.assertEqual(result.decision, Permission.REQUIRES_APPROVAL)
+
+    def test_file_read_allowed_in_scope(self) -> None:
+        result = self._policy.check_tool_call(
+            "file_read", path="readable.txt", scope=self._scope
+        )
+        self.assertEqual(result.decision, Permission.ALLOW)
+
+    def test_file_read_rejected_out_of_scope(self) -> None:
+        result = self._policy.check_tool_call(
+            "file_read", path="../outside.txt", scope=self._scope
+        )
+        self.assertEqual(result.decision, Permission.REJECT)
+
+    def test_file_read_rejected_ignored_path(self) -> None:
+        result = self._policy.check_tool_call(
+            "file_read", path=".git/HEAD", scope=self._scope
+        )
+        self.assertEqual(result.decision, Permission.REJECT)
+
+    def test_file_read_allowed_for_missing_in_scope_path(self) -> None:
+        result = self._policy.check_tool_call(
+            "file_read", path="missing.txt", scope=self._scope
+        )
+        self.assertEqual(result.decision, Permission.ALLOW)
+
+    def test_workspace_inspect_allowed(self) -> None:
+        result = self._policy.check_tool_call(
+            "workspace_inspect", scope=self._scope
+        )
+        self.assertEqual(result.decision, Permission.ALLOW)
+
+    def test_task_get_allowed(self) -> None:
+        result = self._policy.check_tool_call("task_get")
+        self.assertEqual(result.decision, Permission.ALLOW)
+
+    def test_task_list_allowed(self) -> None:
+        result = self._policy.check_tool_call("task_list")
+        self.assertEqual(result.decision, Permission.ALLOW)
+
+    def test_file_read_rejected_no_scope(self) -> None:
+        result = self._policy.check_tool_call(
+            "file_read", path="readable.txt", scope=None
+        )
+        self.assertEqual(result.decision, Permission.REJECT)
+
+    def test_requires_approval_without_side_effect_returns_requires_approval(
+        self,
+    ) -> None:
+        escalation_tool = ToolDescriptor(
+            name="request_permissions",
+            description="Explicit permission escalation request",
+            requires_approval=True,
+        )
+        policy = ToolPermissionPolicy((escalation_tool,))
+        result = policy.check_tool_call("request_permissions")
+        self.assertEqual(result.decision, Permission.REQUIRES_APPROVAL)
+
+    def test_policy_does_not_side_effect(self) -> None:
+        before = sorted(p.name for p in self._tmpdir.iterdir())
+        self._policy.check_tool_call(
+            "file_read", path="readable.txt", scope=self._scope
+        )
+        self._policy.check_tool_call("shell_command")
+        self._policy.check_tool_call("unknown")
+        after = sorted(p.name for p in self._tmpdir.iterdir())
+        self.assertEqual(before, after)
+
+    def test_permission_result_has_reason(self) -> None:
+        result = self._policy.check_tool_call("shell_command")
+        self.assertIsInstance(result.reason, str)
+        self.assertTrue(len(result.reason) > 0)
 
 
 if __name__ == "__main__":
