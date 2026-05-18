@@ -47,19 +47,19 @@ PYTHONPATH=src python -m cocoa repl
 ```
 
 在 REPL 中直接输入：
+- `/help`（显示命令列表）
+- `/status`（查看会话状态：thread、mode、provider、model）
+- `/mode [cheap|balanced|premium|local]`（查看或切换当前模型路由模式）
 - `/configure openai <api_key> <model> [base_url]`
 - `/configure codex-http [model]`
-- `/set [--persist|-p] KEY VALUE`（支持 `KEY=VALUE`，带 `--persist` 同时写入 `.cocoa/config.env`）
-- `/persist`（保存当前会话内所有临时变量到 `.cocoa/config.env`）
-- `/mode [cheap|balanced|premium|local]`（查看或切换当前模型路由模式）
 - `/usage`（查看当前 thread 的 provider/model/token 使用记录）
-- `/history`（查看当前 thread 的 turn projection）
-- `/show <id|last>`（查看 turn 或 item projection）
 - `/pending`（重新列出当前 thread 里未处理的 proposals）
 - `/diff <item_id>`（重新查看 pending file write 的 diff）
+- `/escalate last`（提交上一轮到 reviewer）
 - `/accept <item_id>`（执行 provider 提出的 pending command proposal）
 - `/apply <item_id>`（应用 provider 提出的 pending file write proposal）
 - `/reject <item_id>`（拒绝 pending command/file write proposal）
+- `/exit` 或 `/quit`（退出 REPL）
 
 `/configure` 会把配置落盘到当前工作区的 `.cocoa/config.env`，后续启动会自动读取。
 每一轮会自动附带一个轻量 workspace file map；输入里出现 `@path` 时，cocoa 会在
@@ -76,12 +76,9 @@ REPL 输入区会显示当前 provider/thread 的 compact prompt。安装 `cocoa
 在真实 TTY 里，fallback 输入框也会在输入 `/` 时直接显示 slash command 候选，
 不需要先按 Tab；上下键可移动选中项，Tab/Enter 可接受候选。
 输入行支持左右移动、Home/End、Delete、Ctrl+A/E、Ctrl+K、Ctrl+W 这些基础编辑键。
-`/show` 的 turn/item id、`/inspect` 的工作区路径、普通输入里的 `@path`、
-`/run` 后的 shell command 和后续工作区路径参数同样会出现在候选里。
+普通输入里的 `@path` 和 command 参数同样会出现在候选里。
 非 TTY 或不支持 raw terminal 的环境会
 回退到普通 `input()`。
-
-`/provider` 会显示当前 provider，`/model` 会显示模型（未就绪时显示 `unknown`）。
 
 Provider 可以在普通文本后附一个 `cocoa-proposal` JSON block 来提出命令、精确文件编辑或文件写入建议。
 `cocoa` 会把建议记录为 pending item。`/pending` 可以随时重新列出未处理建议，

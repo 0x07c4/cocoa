@@ -657,7 +657,31 @@ Read references first:
 - `/home/chikee/workspace/claude-code-run/src/utils/permissions/permissions.ts`
 - `/home/chikee/workspace/claude-code-run/src/tools.ts`
 
-### Task 16: Surface Tool Contract To Providers Without Auto-Execution
+### Task 16: Shrink REPL Slash Command Surface
+
+Status: `completed`
+
+What was done:
+
+- `_REPL_COMMANDS` reduced from 24 to 13 (keep-list only)
+- `_REPL_COMMAND_DESCRIPTIONS` and `_COMMANDS_EXPECTING_ARGUMENTS` trimmed
+  to match
+- Removed completion/suggestion handler blocks for `/set`, `/show`,
+  `/inspect`, `/run`, `/task`, `/task-update`
+- Removed dispatch handler blocks for `/set`, `/persist`, `/history`,
+  `/show`, `/tasks`, `/task`, `/task-add`, `/task-update`, `/provider`,
+  `/model`, `/inspect`, `/run`
+- Typing a removed command falls through to "unknown command" handler
+- `/help` lists only kept commands plus `@path`
+- `/status` now includes `model:` line (replaces `/provider` and `/model`)
+- Removed `_SET_OPTIONS` dead constant
+- README.md list updated to match new surface
+- 15 removed-command tests deleted, 6 modified, 3 new tests added
+  (unknown-command fallthrough, /status model, removed commands not in
+  completions)
+- 210 tests pass, mypy clean
+
+### Task 17: Surface Tool Contract To Providers Without Auto-Execution
 
 Status: `pending`
 

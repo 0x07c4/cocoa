@@ -189,7 +189,7 @@ class CliTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
                 with mock.patch("builtins.input", side_effect=[
                     "/configure openai sk-test-key gpt-5",
-                    "/provider",
+                    "/status",
                     "/exit",
                 ]):
                     output = io.StringIO()
@@ -204,23 +204,6 @@ class CliTests(unittest.TestCase):
 
         logs = output.getvalue()
         self.assertIn("provider config persisted to .cocoa/cocoa.toml", logs)
-        self.assertIn("provider: openai-compatible:gpt-5", logs)
-
-    def test_repl_set_updates_provider_in_session(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
-                with mock.patch("builtins.input", side_effect=[
-                    "/set COCOA_PROVIDER=openai",
-                    "/set COCOA_OPENAI_API_KEY=sk-session-key",
-                    "/set COCOA_OPENAI_MODEL gpt-5",
-                    "/provider",
-                    "/exit",
-                ]):
-                    output = io.StringIO()
-                    with redirect_stdout(output):
-                        asyncio.run(run_repl(cwd=Path(tmpdir)))
-        logs = output.getvalue()
-        self.assertIn("COCOA_PROVIDER set", logs)
         self.assertIn("provider: openai-compatible:gpt-5", logs)
 
     def test_repl_mode_sets_session_mode(self) -> None:
@@ -241,83 +224,6 @@ class CliTests(unittest.TestCase):
         logs = output.getvalue()
         self.assertIn("mode: balanced", logs)
         self.assertIn("mode: cheap", logs)
-
-    def test_repl_set_persist_in_session(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
-                with mock.patch(
-                    "builtins.input",
-                    side_effect=[
-                        "/set --persist COCOA_PROVIDER=openai",
-                        "/set --persist COCOA_OPENAI_API_KEY=sk-session-persist",
-                        "/set --persist COCOA_OPENAI_MODEL=gpt-5",
-                        "/exit",
-                    ],
-                ):
-                    output = io.StringIO()
-                    with redirect_stdout(output):
-                        asyncio.run(run_repl(cwd=Path(tmpdir)))
-            cfg_path = Path(tmpdir) / ".cocoa" / "cocoa.toml"
-            self.assertTrue(cfg_path.exists())
-            cfg = cfg_path.read_text(encoding="utf-8")
-            self.assertIn('provider_used = "openai"', cfg)
-            self.assertIn('api_key = "sk-session-persist"', cfg)
-            self.assertIn('model = "gpt-5"', cfg)
-
-        logs = output.getvalue()
-        self.assertIn("COCOA_PROVIDER persisted and set", logs)
-        self.assertIn("COCOA_OPENAI_API_KEY persisted and set", logs)
-        self.assertIn("COCOA_OPENAI_MODEL persisted and set", logs)
-
-    def test_repl_persist_command_writes_overrides(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
-                with mock.patch(
-                    "builtins.input",
-                    side_effect=[
-                        "/set COCOA_PROVIDER=openai",
-                        "/set COCOA_OPENAI_API_KEY=sk-session-persist2",
-                        "/set COCOA_OPENAI_MODEL=gpt-4.1",
-                        "/persist",
-                        "/provider",
-                        "/exit",
-                    ],
-                ):
-                    output = io.StringIO()
-                    with redirect_stdout(output):
-                        asyncio.run(run_repl(cwd=Path(tmpdir)))
-            cfg_path = Path(tmpdir) / ".cocoa" / "cocoa.toml"
-            self.assertTrue(cfg_path.exists())
-            cfg = cfg_path.read_text(encoding="utf-8")
-            self.assertIn('provider_used = "openai"', cfg)
-            self.assertIn('api_key = "sk-session-persist2"', cfg)
-            self.assertIn('model = "gpt-4.1"', cfg)
-        logs = output.getvalue()
-        self.assertIn("session overrides persisted to .cocoa/cocoa.toml", logs)
-        self.assertIn("provider: openai-compatible:gpt-4.1", logs)
-
-    def test_repl_history_and_show_last_use_projection(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
-                with mock.patch(
-                    "builtins.input",
-                    side_effect=[
-                        "hello projection",
-                        "/history",
-                        "/show last",
-                        "/exit",
-                    ],
-                ):
-                    output = io.StringIO()
-                    with redirect_stdout(output):
-                        asyncio.run(run_repl(cwd=Path(tmpdir)))
-        logs = output.getvalue()
-        self.assertIn("conversation", logs)
-        self.assertIn("2 items", logs)
-        self.assertIn("turn:", logs)
-        self.assertIn("user_message", logs)
-        self.assertIn("agent_message", logs)
-        self.assertIn("Provider is not configured yet.", logs)
 
     def test_repl_usage_prints_recorded_turn_usage(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -347,95 +253,15 @@ class CliTests(unittest.TestCase):
             thread = runtime.start_thread(tmp_path)
 
             candidates = _completion_candidates(
-                "/hi",
-                "/hi",
+                "/he",
+                "/he",
                 cwd=tmp_path,
                 store=store,
                 thread_id=thread.id,
             )
 
-        self.assertIn("/history", candidates)
-
-    def test_repl_completion_includes_show_targets(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            store = JsonlStore.for_workspace(tmp_path)
-            runtime = AgentRuntime(store, StubProvider())
-            thread = runtime.start_thread(tmp_path)
-            asyncio.run(runtime.run_user_turn(thread, "hello"))
-
-            candidates = _completion_candidates(
-                "/show ",
-                "",
-                cwd=tmp_path,
-                store=store,
-                thread_id=thread.id,
-            )
-
-        self.assertIn("last", candidates)
-        self.assertTrue(any(candidate.startswith("turn_") for candidate in candidates))
-        self.assertTrue(any(candidate.startswith("item_") for candidate in candidates))
-
-    def test_repl_completion_includes_workspace_paths(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            (tmp_path / "src").mkdir()
-            (tmp_path / "src" / "app.py").write_text("", encoding="utf-8")
-            store = JsonlStore.for_workspace(tmp_path)
-            runtime = AgentRuntime(store, StubProvider())
-            thread = runtime.start_thread(tmp_path)
-
-            candidates = _completion_candidates(
-                "/inspect s",
-                "s",
-                cwd=tmp_path,
-                store=store,
-                thread_id=thread.id,
-            )
-
-        self.assertIn("src/", candidates)
-
-    def test_repl_completion_includes_run_commands(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            bin_path = tmp_path / "bin"
-            bin_path.mkdir()
-            tool = bin_path / "cocoa-cat"
-            tool.write_text("#!/bin/sh\n", encoding="utf-8")
-            tool.chmod(0o755)
-            store = JsonlStore.for_workspace(tmp_path)
-            runtime = AgentRuntime(store, StubProvider())
-            thread = runtime.start_thread(tmp_path)
-
-            with mock.patch.dict(os.environ, {"PATH": str(bin_path)}):
-                candidates = _completion_candidates(
-                    "/run cocoa-c",
-                    "cocoa-c",
-                    cwd=tmp_path,
-                    store=store,
-                    thread_id=thread.id,
-                )
-
-        self.assertIn("cocoa-cat", candidates)
-
-    def test_repl_completion_includes_run_argument_paths(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            (tmp_path / "tmp").mkdir()
-            (tmp_path / "tmp" / "cocoa-demo.txt").write_text("hello\n", encoding="utf-8")
-            store = JsonlStore.for_workspace(tmp_path)
-            runtime = AgentRuntime(store, StubProvider())
-            thread = runtime.start_thread(tmp_path)
-
-            candidates = _completion_candidates(
-                "/run cat tmp/c",
-                "tmp/c",
-                cwd=tmp_path,
-                store=store,
-                thread_id=thread.id,
-            )
-
-        self.assertIn("tmp/cocoa-demo.txt", candidates)
+        self.assertIn("/help", candidates)
+        self.assertNotIn("/history", candidates)
 
     def test_repl_completion_includes_at_workspace_paths(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -554,8 +380,8 @@ class CliTests(unittest.TestCase):
             )
 
         self.assertIn(("/help", "show commands"), suggestions)
-        self.assertIn(("/history", "show thread turns"), suggestions)
         self.assertIn(("/status", "show session status"), suggestions)
+        self.assertNotIn(("/history", "show thread turns"), suggestions)
 
     def test_repl_suggestions_filter_commands_while_typing(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -565,27 +391,27 @@ class CliTests(unittest.TestCase):
             thread = runtime.start_thread(tmp_path)
 
             suggestions = _suggestion_items(
-                "/hi",
+                "/he",
                 cwd=tmp_path,
                 store=store,
                 thread_id=thread.id,
             )
 
-        self.assertEqual(suggestions, [("/history", "show thread turns")])
+        self.assertEqual(suggestions, [("/help", "show commands")])
 
     def test_apply_completion_adds_space_for_argument_commands(self) -> None:
-        self.assertEqual(_apply_completion_candidate("/", "/show"), "/show ")
-        self.assertEqual(_apply_completion_candidate("/show ", "last"), "/show last")
+        self.assertEqual(_apply_completion_candidate("/", "/diff"), "/diff ")
+        self.assertEqual(_apply_completion_candidate("/diff ", "abc123"), "/diff abc123")
 
     def test_apply_completion_preserves_text_after_cursor(self) -> None:
         line, cursor = _apply_completion_candidate_at_cursor(
-            "/sh later",
-            len("/sh"),
-            "/show",
+            "/di later",
+            len("/di"),
+            "/diff",
         )
 
-        self.assertEqual(line, "/show later")
-        self.assertEqual(cursor, len("/show "))
+        self.assertEqual(line, "/diff later")
+        self.assertEqual(cursor, len("/diff "))
 
     def test_apply_completion_replaces_current_token_suffix(self) -> None:
         line, cursor = _apply_completion_candidate_at_cursor(
@@ -714,139 +540,75 @@ class CliTests(unittest.TestCase):
         from cocoa import config as cocoa_config
         ...
 
-    def test_repl_task_add_creates_task(self) -> None:
+    def test_repl_unknown_command_for_removed_commands(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
                 with mock.patch(
                     "builtins.input",
                     side_effect=[
-                        "/task-add Implement login -- Add user authentication",
+                        "/history",
+                        "/set COCOA_PROVIDER=openai",
+                        "/provider",
+                        "/model",
+                        "/inspect",
+                        "/show last",
                         "/tasks",
+                        "/run echo hello",
                         "/exit",
                     ],
                 ):
                     output = io.StringIO()
                     with redirect_stdout(output):
-                        asyncio.run(run_repl(cwd=tmp_path))
+                        asyncio.run(run_repl(cwd=Path(tmpdir)))
         logs = output.getvalue()
-        self.assertIn("created:", logs)
-        self.assertIn("Implement login", logs)
-        self.assertIn("pending", logs)
+        unknown_count = logs.count("unknown command")
+        self.assertGreaterEqual(
+            unknown_count, 8, f"expected >=8 unknown command messages, got {unknown_count}"
+        )
 
-    def test_repl_task_add_without_description(self) -> None:
+    def test_repl_status_includes_model(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
                 with mock.patch(
                     "builtins.input",
-                    side_effect=[
-                        "/task-add Quick fix",
-                        "/tasks",
-                        "/exit",
-                    ],
+                    side_effect=["/status", "/exit"],
                 ):
                     output = io.StringIO()
                     with redirect_stdout(output):
-                        asyncio.run(run_repl(cwd=tmp_path))
+                        asyncio.run(run_repl(cwd=Path(tmpdir)))
         logs = output.getvalue()
-        self.assertIn("Quick fix", logs)
+        self.assertIn("model:", logs)
 
-    def test_repl_task_show_displays_task(self) -> None:
+    def test_repl_removed_commands_not_in_completions(self) -> None:
         with TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             store = JsonlStore.for_workspace(tmp_path)
             runtime = AgentRuntime(store, StubProvider())
             thread = runtime.start_thread(tmp_path)
-            item = runtime.create_task(thread, "Test task")
-            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
-                with mock.patch(
-                    "builtins.input",
-                    side_effect=[
-                        f"/task {item.id}",
-                        "/exit",
-                    ],
-                ):
-                    output = io.StringIO()
-                    with redirect_stdout(output):
-                        asyncio.run(run_repl(cwd=tmp_path, thread_id=thread.id))
-        logs = output.getvalue()
-        self.assertIn("item:", logs)
-        self.assertIn("task", logs)
-        self.assertIn("Test task", logs)
-
-    def test_repl_task_update_changes_status(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            store = JsonlStore.for_workspace(tmp_path)
-            runtime = AgentRuntime(store, StubProvider())
-            thread = runtime.start_thread(tmp_path)
-            item = runtime.create_task(thread, "Update me")
-            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
-                with mock.patch(
-                    "builtins.input",
-                    side_effect=[
-                        f"/task-update {item.id} --status in_progress",
-                        "/tasks",
-                        "/exit",
-                    ],
-                ):
-                    output = io.StringIO()
-                    with redirect_stdout(output):
-                        asyncio.run(run_repl(cwd=tmp_path, thread_id=thread.id))
-        logs = output.getvalue()
-        self.assertIn("updated:", logs)
-        self.assertIn("in_progress", logs)
-
-    def test_repl_tasks_shows_empty_message(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            with mock.patch.dict(os.environ, {"COCOA_CODEX_HOME": tmpdir}, clear=True):
-                with mock.patch(
-                    "builtins.input",
-                    side_effect=["/tasks", "/exit"],
-                ):
-                    output = io.StringIO()
-                    with redirect_stdout(output):
-                        asyncio.run(run_repl(cwd=tmp_path))
-        logs = output.getvalue()
-        self.assertIn("no tasks", logs)
-
-    def test_repl_task_completion_includes_task_ids(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            store = JsonlStore.for_workspace(tmp_path)
-            runtime = AgentRuntime(store, StubProvider())
-            thread = runtime.start_thread(tmp_path)
-            item = runtime.create_task(thread, "Complete me")
 
             candidates = _completion_candidates(
-                f"/task {item.id[:8]}",
-                item.id[:8],
-                cwd=tmp_path,
-                store=store,
-                thread_id=thread.id,
-            )
-
-        self.assertIn(item.id, candidates)
-
-    def test_repl_suggestions_include_task_commands(self) -> None:
-        with TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            store = JsonlStore.for_workspace(tmp_path)
-            runtime = AgentRuntime(store, StubProvider())
-            thread = runtime.start_thread(tmp_path)
-
-            suggestions = _suggestion_items(
+                "/",
                 "/",
                 cwd=tmp_path,
                 store=store,
                 thread_id=thread.id,
             )
 
-        self.assertIn(("/tasks", "list current tasks"), suggestions)
-        self.assertIn(("/task-add", "create a new task"), suggestions)
-        self.assertIn(("/task-update", "update a task"), suggestions)
+        self.assertIn("/help", candidates)
+        self.assertNotIn("/history", candidates)
+        self.assertNotIn("/set", candidates)
+        self.assertNotIn("/provider", candidates)
+        self.assertNotIn("/model", candidates)
+        self.assertNotIn("/show", candidates)
+        self.assertNotIn("/tasks", candidates)
+        self.assertNotIn("/task", candidates)
+        self.assertNotIn("/task-add", candidates)
+        self.assertNotIn("/task-update", candidates)
+        self.assertNotIn("/run", candidates)
+        self.assertNotIn("/inspect", candidates)
+        self.assertNotIn("/persist", candidates)
 
 
 if __name__ == "__main__":

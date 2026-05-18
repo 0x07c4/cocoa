@@ -41,30 +41,17 @@ _REPL_COMMANDS = (
     "/escalate",
     "/exit",
     "/help",
-    "/history",
-    "/inspect",
-    "/model",
     "/mode",
     "/pending",
-    "/persist",
-    "/provider",
     "/quit",
     "/reject",
-    "/run",
-    "/set",
-    "/show",
     "/status",
-    "/task",
-    "/task-add",
-    "/task-update",
-    "/tasks",
     "/usage",
 )
 
 _CONFIGURE_MODES = ("clear", "codex-http", "openai")
 _MODEL_MODES = ("balanced", "cheap", "premium", "local")
 _MODEL_MODE_ENV = "COCOA_MODEL_MODE"
-_SET_OPTIONS = ("--persist", "-p")
 
 _REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
     "/accept": "run pending command",
@@ -74,23 +61,11 @@ _REPL_COMMAND_DESCRIPTIONS: Mapping[str, str] = {
     "/escalate": "escalate last turn to reviewer",
     "/exit": "quit cocoa",
     "/help": "show commands",
-    "/history": "show thread turns",
-    "/inspect": "list workspace files",
-    "/model": "show model",
     "/mode": "show or set routing mode",
     "/pending": "show pending proposals",
-    "/persist": "save session config",
-    "/provider": "show provider",
     "/quit": "quit cocoa",
     "/reject": "reject pending proposal",
-    "/run": "run shell command",
-    "/set": "set session variable",
-    "/show": "show turn or item",
     "/status": "show session status",
-    "/task": "show task details",
-    "/task-add": "create a new task",
-    "/task-update": "update a task",
-    "/tasks": "list current tasks",
     "/usage": "show model usage",
 }
 
@@ -111,15 +86,8 @@ _COMMANDS_EXPECTING_ARGUMENTS = {
     "/configure",
     "/diff",
     "/escalate",
-    "/inspect",
     "/mode",
     "/reject",
-    "/run",
-    "/set",
-    "/show",
-    "/task",
-    "/task-add",
-    "/task-update",
 }
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -475,14 +443,6 @@ def _completion_candidates(
         return [mode for mode in _CONFIGURE_MODES if mode.startswith(text)]
     if command == "/mode":
         return [mode for mode in _MODEL_MODES if mode.startswith(text)]
-    if command == "/set":
-        return [option for option in _SET_OPTIONS if option.startswith(text)]
-    if command == "/show":
-        return [
-            candidate
-            for candidate in _show_completion_candidates(store, thread_id)
-            if candidate.startswith(text)
-        ]
     if command == "/accept":
         return [
             candidate
@@ -509,30 +469,6 @@ def _completion_candidates(
             for candidate in _pending_proposal_completion_candidates(store, thread_id)
             if candidate.startswith(text)
         ]
-    if command == "/inspect":
-        return _workspace_path_completion_candidates(cwd, text)
-    if command == "/run":
-        return _run_completion_candidates(cwd, line, text)
-    if command == "/task":
-        return [
-            candidate
-            for candidate in _task_item_completion_candidates(store, thread_id)
-            if candidate.startswith(text)
-        ]
-    if command == "/task-update":
-        parts = line.split()
-        if len(parts) <= 2:
-            return [
-                candidate
-                for candidate in _task_item_completion_candidates(store, thread_id)
-                if candidate.startswith(text)
-            ]
-        if len(parts) == 3 and not line.endswith(" "):
-            return []
-        if "--status" in parts:
-            status_values = ["pending", "in_progress", "completed"]
-            return [s for s in status_values if s.startswith(text)]
-        return ["--status"]
     return []
 
 
@@ -613,16 +549,6 @@ def _completion_description(line: str, candidate: str) -> str:
         if candidate == "local":
             return "prefer local OpenAI-compatible models"
         return "routing mode"
-    if command == "/set":
-        return _SET_OPTION_DESCRIPTIONS.get(candidate, "")
-    if command == "/show":
-        if candidate in {"last", "."}:
-            return "latest turn"
-        if candidate.startswith("turn_"):
-            return "turn projection"
-        if candidate.startswith("item_"):
-            return "item projection"
-        return "projection target"
     if command == "/accept":
         return "pending command"
     if command == "/apply":
@@ -633,8 +559,6 @@ def _completion_description(line: str, candidate: str) -> str:
         return "last turn escalation to reviewer"
     if command == "/reject":
         return "pending proposal"
-    if command == "/inspect":
-        return "workspace path"
     if command == "/run":
         raw = line.partition(" ")[2]
         parts = raw.split()
@@ -683,20 +607,6 @@ def _format_suggestion_lines(
     return lines
 
 
-def _show_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
-    candidates = ["last", "."]
-    try:
-        view = load_thread_view(store, thread_id)
-    except ValueError:
-        return candidates
-
-    for turn in view.turns:
-        candidates.append(turn.id)
-        for item in turn.items:
-            candidates.append(item.id)
-    return candidates
-
-
 def _pending_command_completion_candidates(store: JsonlStore, thread_id: str) -> list[str]:
     return _pending_item_completion_candidates(store, thread_id, kind="command")
 
@@ -732,22 +642,6 @@ def _pending_item_completion_candidates(
                 and item.status == "pending"
                 and item.approval == "requested"
             ):
-                candidates.append(item.id)
-    return candidates
-
-
-def _task_item_completion_candidates(
-    store: JsonlStore,
-    thread_id: str,
-) -> list[str]:
-    try:
-        view = load_thread_view(store, thread_id)
-    except ValueError:
-        return []
-    candidates: list[str] = []
-    for turn in view.turns:
-        for item in turn.items:
-            if item.kind == "task":
                 candidates.append(item.id)
     return candidates
 
@@ -789,16 +683,6 @@ def _workspace_reference_completion_candidates(cwd: Path, text: str) -> list[str
         f"@{candidate}"
         for candidate in _workspace_path_completion_candidates(cwd, text[1:])
     ]
-
-
-def _run_completion_candidates(cwd: Path, line: str, text: str) -> list[str]:
-    raw = line.partition(" ")[2]
-    parts = raw.split()
-    completing_new_arg = raw.endswith(" ")
-    completing_command = not parts or (len(parts) == 1 and not completing_new_arg)
-    if completing_command and "/" not in text:
-        return _executable_completion_candidates(text)
-    return _workspace_path_completion_candidates(cwd, text)
 
 
 def _executable_completion_candidates(text: str, max_entries: int = 80) -> list[str]:
@@ -1628,31 +1512,16 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 break
             if line == "/help":
                 print("/help               show commands")
-                print("/status             show session status")
-                print("/provider           show provider status")
-                print("/model              show model selection")
+                print("/status             show session status (thread, mode, provider, model)")
                 print("/mode [name]        show or set routing mode")
                 print("/configure          configure provider in session or save config")
-                print("/set [--persist|-p] KEY VALUE")
-                print("                    set session variable (and optionally persist)")
-                print("/persist            persist current session overrides to .cocoa/cocoa.toml")
-                print("/history            show turns in current thread")
                 print("/usage              show model usage in current thread")
-                print("/show <id|last>     show a turn or item projection")
-                print("/tasks              list current tasks")
-                print("/task <id>          show task details")
-                print("/task-add <subject> -- [description]")
-                print("                    create a new task")
-                print("/task-update <id> --status <status>")
-                print("                    update task status")
                 print("/pending            show pending proposals")
                 print("/diff <item_id>     show pending file write diff")
                 print("/escalate last      escalate previous turn to reviewer/planner")
                 print("/accept <item_id>   run a pending command proposal")
                 print("/apply <item_id>    apply a pending file write proposal")
                 print("/reject <item_id>   reject a pending proposal")
-                print("/inspect [path]     list workspace files")
-                print("/run <command>      run shell command after approval")
                 print("@path               include file or directory context in a prompt")
                 print("/exit               quit")
                 continue
@@ -1721,60 +1590,13 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     continue
                 print("unknown /configure mode. use openai | codex-http | clear")
                 continue
-            if line.startswith("/set "):
-                _, _, raw = line.partition(" ")
-                try:
-                    tokens = shlex.split(raw)
-                except ValueError:
-                    print("invalid quoting in command")
-                    continue
-                persist = False
-                if not tokens:
-                    print("usage: /set [--persist|-p] KEY VALUE")
-                    continue
-                if tokens[0] in {"-p", "--persist"}:
-                    persist = True
-                    tokens = tokens[1:]
-                if not tokens:
-                    print("usage: /set [--persist|-p] KEY VALUE")
-                    continue
-                if "=" in tokens[0] and len(tokens) == 1:
-                    key, value = tokens[0].split("=", 1)
-                elif len(tokens) >= 2:
-                    key = tokens[0]
-                    value = " ".join(tokens[1:])
-                else:
-                    print("usage: /set [--persist|-p] KEY VALUE")
-                    continue
-                if not key:
-                    print("missing variable name")
-                    continue
-                session.set_override(key, value)
-                env = session.current_env()
-                if persist:
-                    _persist_environment(cwd, {key: value})
-                print(f"{key} {'persisted and ' if persist else ''}set")
-                print_provider_status()
-                continue
-            if line == "/persist":
-                overrides = session.overrides
-                if not overrides:
-                    print("no session overrides to persist")
-                    continue
-                data = cocoa_config.load_workspace_config(cwd)
-                data = cocoa_config.merge_session_overrides(data, overrides)
-                cocoa_config.save_workspace_config(cwd, data)
-                print("session overrides persisted to .cocoa/cocoa.toml")
-                continue
             if line == "/status":
                 print(f"thread: {session.thread.id}")
                 print(f"cwd: {cwd}")
                 print(f"log: {session.thread_path()}")
                 print(f"mode: {session.resolved_mode()}")
                 print(f"provider: {session.provider_status_text()}")
-                continue
-            if line == "/history":
-                print_history(session.store, session.thread.id)
+                print(f"model: {session.provider_model()}")
                 continue
             if line == "/usage":
                 _print_usage(session.store, session.thread.id)
@@ -1783,84 +1605,6 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 _print_pending_proposals(
                     _pending_proposal_views(session.store, session.thread.id)
                 )
-                continue
-            if line == "/show" or line.startswith("/show "):
-                _, _, target = line.partition(" ")
-                target = target.strip()
-                if not target:
-                    print("usage: /show <turn_id|item_id|last>")
-                    continue
-                print_show(session.store, session.thread.id, target)
-                continue
-            if line == "/tasks":
-                tasks = session.list_tasks()
-                if not tasks:
-                    print("no tasks")
-                    continue
-                print("tasks:")
-                for t in tasks:
-                    t_status = t.content.get("status", "unknown")
-                    t_subject = t.content.get("subject", "-")
-                    print(f"  {t.id}\t{t_status}\t{t_subject}")
-                continue
-            if line == "/task":
-                print("usage: /task <id>")
-                continue
-            if line.startswith("/task "):
-                _, _, target = line.partition(" ")
-                target = target.strip()
-                if not target:
-                    print("usage: /task <id>")
-                    continue
-                view = load_thread_view(session.store, session.thread.id)
-                found_item = view.find_item(target)
-                if found_item is None or found_item.kind != "task":
-                    print(f"task not found: {target}")
-                    continue
-                _print_item_view(found_item)
-                continue
-            if line.startswith("/task-add "):
-                raw = line.removeprefix("/task-add ").strip()
-                if " -- " in raw:
-                    subject, description = raw.split(" -- ", 1)
-                else:
-                    subject = raw
-                    description = ""
-                subject = subject.strip()
-                if not subject:
-                    print("usage: /task-add <subject> -- [description]")
-                    continue
-                try:
-                    created_task = session.create_task(subject, description=description)
-                except ValueError as exc:
-                    print(str(exc))
-                    continue
-                print(f"created: {created_task.id}")
-                print(f"subject: {subject}")
-                continue
-            if line.startswith("/task-update "):
-                raw = line.removeprefix("/task-update ").strip()
-                parts = shlex.split(raw)
-                if not parts:
-                    print("usage: /task-update <id> --status <status>")
-                    continue
-                item_id = parts[0]
-                status: str | None = None
-                for i, part in enumerate(parts[1:], 1):
-                    if part == "--status" and i + 1 < len(parts):
-                        status = parts[i + 1]
-                        break
-                if not status:
-                    print("usage: /task-update <id> --status <status>")
-                    print("available: pending | in_progress | completed")
-                    continue
-                try:
-                    updated_task = session.update_task(item_id, status=status)
-                except ValueError as exc:
-                    print(str(exc))
-                    continue
-                print(f"updated: {updated_task.id}")
-                print(f"status: {status}")
                 continue
             if line == "/diff" or line.startswith("/diff "):
                 _, _, target = line.partition(" ")
@@ -1932,16 +1676,6 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                 if isinstance(label, str) and label:
                     print(f"target: {label}")
                 continue
-            if line == "/provider":
-                print(f"provider: {session.provider_status_text()}")
-                continue
-            if line == "/model":
-                print(f"model: {session.provider_model()}")
-                continue
-            if line.startswith("/inspect"):
-                _, _, raw_path = line.partition(" ")
-                print_inspect(cwd, raw_path or ".", max_entries=80)
-                continue
             if line.startswith("/escalate "):
                 _, _, raw_target = line.partition(" ")
                 target = raw_target.strip()
@@ -1958,19 +1692,6 @@ async def run_repl(cwd: Path, thread_id: str | None = None) -> None:
                     print(str(exc))
                     continue
                 print(escalation_result.message)
-                continue
-            if line.startswith("/run "):
-                command = line.removeprefix("/run ").strip()
-                if not command:
-                    print("missing command")
-                    continue
-                shell_result = await session.run_shell_turn(command)
-                if shell_result.stdout:
-                    print(shell_result.stdout, end="" if shell_result.stdout.endswith("\n") else "\n")
-                if shell_result.stderr:
-                    print(shell_result.stderr, end="" if shell_result.stderr.endswith("\n") else "\n")
-                if shell_result.exit_code is not None:
-                    print(f"exit_code: {shell_result.exit_code}")
                 continue
             if line.startswith("/"):
                 print("unknown command. type /help for commands.")
