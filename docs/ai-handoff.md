@@ -638,11 +638,14 @@ What was added:
   - workspace-scoped tool with out-of-scope path → REJECT
   - workspace-scoped tool with ignored path → REJECT
   - workspace-scoped tool with valid/missing in-scope path → ALLOW
+  - path-required tool called without path → REJECT
   - read-only non-workspace tool → ALLOW
-- 17 tests in `test_tools.py` covering all acceptance criteria
+- 18 tests in `test_tools.py` covering all acceptance criteria
 - Policy is data-only: instantiates from `ToolDescriptor` tuples, never
   executes tools, never touches filesystem during evaluation
 - Existing proposal/apply gates unchanged
+- Post-review fix: added `path_required` field to `ToolDescriptor`;
+  `file_read` without a path now returns REJECT
 
 Read references first:
 
