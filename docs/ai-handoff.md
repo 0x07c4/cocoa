@@ -133,6 +133,8 @@ Expected behavior:
 
 ### Phase 4: Tool Registry And Permission Policy
 
+Status: `partially implemented (Tasks 14-16)`
+
 Objective: introduce a minimal `Tool` interface without turning `cocoa` into a
 large autonomous tool runner.
 
@@ -575,6 +577,117 @@ Acceptance:
 - context builder owns workspace/date/git/instruction/`@path` context assembly
 - runtime remains the only source of event writes and side-effect boundaries
 - no provider prompt regression in existing runtime tests
+- `mypy src/cocoa` passes
+- `PYTHONPATH=src python -m unittest discover -s tests -q` passes
+
+### Task 14: Formalize Tool Registry Metadata
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/tools.py`
+- `src/cocoa/runtime.py`
+- `src/cocoa/session.py`
+- `tests/test_tools.py`
+- `tests/test_session.py` if needed
+
+Implementation:
+
+- keep the existing static builtin registry; do not add dynamic plugins, MCP,
+  browser, web, or remote tools
+- extend the minimal tool metadata so each builtin tool states:
+  - stable name
+  - description
+  - read-only vs side-effect behavior
+  - workspace scope requirement where relevant
+  - approval/proposal requirement where relevant
+- make the initial core set complete:
+  - `workspace_inspect`
+  - `file_read`
+  - `shell_command`
+  - `file_write`
+  - `file_edit` if file edit remains a distinct proposal capability
+  - `task_create`
+  - `task_get`
+  - `task_list`
+  - `task_update`
+- keep compatibility for existing `list_registered_tools()` callers
+
+Acceptance:
+
+- registry tests prove names are stable and unique
+- side-effect tools are never read-only
+- write/command tools require approval/proposal metadata
+- read-only workspace tools declare workspace scope
+- `mypy src/cocoa` passes
+- `PYTHONPATH=src python -m unittest discover -s tests -q` passes
+
+### Task 15: Add A Testable Permission Policy Layer
+
+Status: `pending`
+
+Files:
+
+- `src/cocoa/tools.py`
+- `src/cocoa/workspace.py` if needed
+- `tests/test_tools.py`
+- `tests/test_workspace.py` if needed
+
+Implementation:
+
+- add a small permission policy helper for tool use decisions
+- policy must be data-only and testable; it should not execute tools
+- expected decisions:
+  - read-only workspace tools are allowed only for paths inside
+    `WorkspaceScope` and outside ignored paths
+  - missing paths may be reported as read failures, but must not escape scope
+  - command and write/edit tools require proposal/approval and must not be
+    auto-executed by policy
+  - unsupported tool names are rejected
+- keep existing proposal/apply gates unchanged
+
+Acceptance:
+
+- tests cover allowed in-scope reads
+- tests cover ignored paths and out-of-workspace paths
+- tests cover side-effect tools returning `requires_approval`
+- tests cover unknown tool rejection
+- no command/file write side effect happens from policy evaluation
+- `mypy src/cocoa` passes
+- `PYTHONPATH=src python -m unittest discover -s tests -q` passes
+
+### Task 16: Surface Tool Contract To Providers Without Auto-Execution
+
+Status: `pending`
+
+Files:
+
+- `src/cocoa/providers.py`
+- `src/cocoa/runtime.py` if needed
+- `tests/test_providers.py`
+- `tests/test_runtime.py` if needed
+- `docs/architecture.md`
+
+Implementation:
+
+- expose the builtin tool contract in provider instructions or request context
+  so the model understands available capabilities and permission boundaries
+- preserve the existing `cocoa-proposal` path for command and file write/edit
+  side effects
+- explicitly tell providers that `cocoa` will not auto-run side-effect tools;
+  they must produce pending proposals for user approval
+- do not implement a model-driven autonomous tool loop in this task
+- document the tool registry / permission policy boundary in architecture docs
+
+Acceptance:
+
+- provider tests prove the prompt/instructions include the tool contract and
+  side-effect approval rule
+- existing proposal parsing tests still pass
+- runtime still records read context as items and side effects as pending
+  proposals or approved apply/run events
+- no MCP/web/browser/computer-use tool surface is introduced
 - `mypy src/cocoa` passes
 - `PYTHONPATH=src python -m unittest discover -s tests -q` passes
 

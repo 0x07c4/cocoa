@@ -46,6 +46,8 @@ class ToolDescriptor:
     description: str
     read_only: bool = False
     side_effect: bool = False
+    workspace_scope_required: bool = False
+    requires_approval: bool = False
 
 
 BUILTIN_TOOLS: tuple[ToolDescriptor, ...] = (
@@ -53,26 +55,43 @@ BUILTIN_TOOLS: tuple[ToolDescriptor, ...] = (
         name="workspace_inspect",
         description="List and size files inside the workspace scope.",
         read_only=True,
+        workspace_scope_required=True,
     ),
     ToolDescriptor(
         name="file_read",
         description="Read the content of a file inside the workspace scope.",
         read_only=True,
+        workspace_scope_required=True,
     ),
     ToolDescriptor(
         name="shell_command",
         description="Propose a shell command for user approval and execution.",
         side_effect=True,
+        requires_approval=True,
     ),
     ToolDescriptor(
         name="file_write",
-        description="Write or edit a file inside the workspace scope after user approval.",
+        description="Propose to write or edit a file inside the workspace scope.",
         side_effect=True,
+        workspace_scope_required=True,
+        requires_approval=True,
+    ),
+    ToolDescriptor(
+        name="file_edit",
+        description="Propose an exact-text file edit inside the workspace scope.",
+        side_effect=True,
+        workspace_scope_required=True,
+        requires_approval=True,
     ),
     ToolDescriptor(
         name="task_create",
         description="Create a new task item in the current thread.",
         side_effect=True,
+    ),
+    ToolDescriptor(
+        name="task_get",
+        description="Get a single task item by its id.",
+        read_only=True,
     ),
     ToolDescriptor(
         name="task_update",
