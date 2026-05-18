@@ -117,6 +117,8 @@ Expected behavior:
 
 ### Phase 3: Context Builder
 
+Status: `implemented (Tasks 11-13)`
+
 Objective: add a bounded context builder inspired by `context.ts`.
 
 Expected behavior:
@@ -479,6 +481,100 @@ Acceptance:
 - `cli.py` no longer owns active thread lifecycle outside session construction
 - `AgentRuntime` remains the event/proposal/approval owner
 - `SessionEngine` does not introduce a second source of truth
+- `mypy src/cocoa` passes
+- `PYTHONPATH=src python -m unittest discover -s tests -q` passes
+
+### Task 11: Harden Context Bounds And Truncation Markers
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/context.py`
+- `tests/test_runtime.py`
+- `tests/test_workspace.py` if needed
+
+Implementation:
+
+- keep the existing `build_workspace_context()` shape; do not rewrite the
+  context system
+- make all bounded context surfaces explicit and testable:
+  - git status output has a max line/char bound and a clear truncation marker
+  - workspace map states when it hit the entry cap
+  - instruction files and `@path` file reads include a clear truncation marker
+    in both item content and provider context text
+- keep broad scans bounded by existing workspace scope and max-entry limits
+- do not include ignored paths, `.git`, `.cocoa`, dependency/build folders, or
+  out-of-workspace paths in context
+
+Acceptance:
+
+- provider request receives bounded context when git status, workspace map, or
+  file content is large
+- truncation is visible to the model and visible in recorded context items
+- existing context behavior remains compatible for small workspaces
+- `PYTHONPATH=src python -m unittest discover -s tests -q` passes
+
+### Task 12: Strengthen Instruction File And `@path` Scope Tests
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/context.py`
+- `tests/test_runtime.py`
+- `tests/test_workspace.py` if needed
+
+Implementation:
+
+- preserve automatic root-level `AGENTS.md` and `CLAUDE.md` discovery
+- treat nested or extra instruction files as explicit context only when the
+  prompt references them with `@path`
+- add tests for:
+  - `CLAUDE.md` inclusion
+  - ignored `@path` rejection
+  - out-of-workspace `@path` rejection
+  - missing `@path` recorded as a failed context item
+  - binary `@path` recorded as a failed context item
+  - directory `@path` recorded as `WORKSPACE_INSPECT`
+  - reference-count cap includes a skipped-reference marker
+
+Acceptance:
+
+- every accepted `@path` reference is visible in provider context and recorded
+  as `FILE_READ` or `WORKSPACE_INSPECT`
+- every rejected `@path` reference is recorded as a failed context item with a
+  useful error
+- instruction files never bypass workspace scope or ignore rules
+- `PYTHONPATH=src python -m unittest discover -s tests -q` passes
+
+### Task 13: Clarify Runtime/Context Boundary
+
+Status: `completed`
+
+Files:
+
+- `src/cocoa/context.py`
+- `src/cocoa/runtime.py`
+- `docs/architecture.md`
+- `tests/test_runtime.py`
+
+Implementation:
+
+- keep `AgentRuntime` as the event owner and provider request owner
+- keep workspace context assembly in `src/cocoa/context.py`; `runtime.py` should
+  only adapt `BuiltContext` into runtime events/items
+- do not move proposal, approval, task, or thread replay semantics into
+  `context.py`
+- document the boundary in `docs/architecture.md`
+- if thread replay extraction is attempted, keep it small and behavior-neutral;
+  otherwise document why it remains runtime-owned for now
+
+Acceptance:
+
+- context builder owns workspace/date/git/instruction/`@path` context assembly
+- runtime remains the only source of event writes and side-effect boundaries
+- no provider prompt regression in existing runtime tests
 - `mypy src/cocoa` passes
 - `PYTHONPATH=src python -m unittest discover -s tests -q` passes
 

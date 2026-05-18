@@ -71,21 +71,49 @@ The first CLI projection commands are `/history` and `/show <id|last>`. Future
 TUI/editor surfaces should read the same projection layer instead of inventing a
 separate session state.
 
-## Workspace Context
+## Context Builder Boundary
 
-Every provider request may include a compact workspace context owned by the
-runtime, not by the provider. The first implementation includes a lightweight
-file map for orientation and supports explicit `@path` references in the user
-prompt:
+Workspace context assembly follows a clear two-layer boundary:
 
-- file references are recorded as `FILE_READ` items
-- directory references are recorded as `WORKSPACE_INSPECT` items
-- ignored paths and paths outside the workspace are rejected by `WorkspaceScope`
-- large files are truncated before entering model context
+- **Context builder** (`src/cocoa/context.py`) owns workspace-aware content
+  assembly: current date, git status, instruction files, workspace file map, and
+  `@path` reference resolution. It returns a `BuiltContext` with assembled text
+  and recorded item records. It does not write events, own thread state, or
+  interact with providers.
+- **Runtime** (`src/cocoa/runtime.py`) adapts `BuiltContext` into the runtime
+  event stream. It calls `build_workspace_context()` from `context.py`, writes
+  `ITEM_COMPLETED` events for each context item, and passes the assembled text
+  to the provider request. It does not duplicate context assembly logic.
 
-This keeps the product loop explicit: the user decides which files matter, cocoa
-records what was read, and the provider receives enough context to propose real
-workspace changes.
+This boundary keeps context assembly testable without runtime setup and keeps
+the runtime the single source of event writes and side-effect boundaries.
+
+Current context builder scope:
+
+- current date and time
+- bounded `git status --short --branch` output with explicit truncation markers
+- automatic discovery of root-level `AGENTS.md` and `CLAUDE.md` instruction
+  files within workspace scope
+- workspace file map via `WorkspaceScope.inspect()`, capped at 80 entries with
+  clear cap markers
+- explicit `@path` reference resolution in user prompts:
+  - file references are recorded as `FILE_READ` items
+  - directory references are recorded as `WORKSPACE_INSPECT` items
+  - ignored paths and paths outside the workspace are rejected by
+    `WorkspaceScope` and recorded as `FILE_READ` failed items
+  - binary files are detected and recorded as `FILE_READ` failed items
+  - missing paths are recorded as `FILE_READ` failed items
+  - large files are truncated at 32 KB with truncation markers
+  - reference count is capped at 6 with explicit skipped-reference markers
+
+### Thread Context (Runtime-Owned)
+
+Thread replay context — the textual summary of prior turns, commands, and file
+operations visible to the model — remains owned by `AgentRuntime` and built
+ad hoc in `_build_thread_context()`. Extracting it into `context.py` would
+require either duplicating projection logic or pulling store access into the
+context layer, which would weaken the runtime boundary. It stays in the runtime
+for now.
 
 ## Approval Boundary
 
