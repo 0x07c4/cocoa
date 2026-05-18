@@ -20,6 +20,8 @@ _PATH_REFERENCE_RE = re.compile(
     r"(?<![\w@])@(?P<path>[A-Za-z0-9][A-Za-z0-9._/\-]*)(?=$|[\s,.;:!?)}\]])"
 )
 
+_MAX_GIT_STATUS_LINES = 40
+_MAX_GIT_STATUS_CHARS = 4_000
 _MAX_WORKSPACE_MAP_ENTRIES = 80
 _MAX_CONTEXT_REFERENCES = 6
 _MAX_CONTEXT_FILE_BYTES = 32_000
@@ -97,7 +99,22 @@ def _build_git_status_context(root: Path) -> str | None:
     output = result.stdout.strip()
     if not output:
         return "Git status: clean"
-    return f"Git status:\n{output}"
+
+    lines = output.splitlines()
+    capped = False
+    if len(lines) > _MAX_GIT_STATUS_LINES:
+        lines = lines[:_MAX_GIT_STATUS_LINES]
+        capped = True
+
+    text = "\n".join(lines)
+    if len(text) > _MAX_GIT_STATUS_CHARS:
+        text = text[:_MAX_GIT_STATUS_CHARS]
+        capped = True
+
+    result_text = f"Git status:\n{text}"
+    if capped:
+        result_text += "\n[git status truncated by cocoa]"
+    return result_text
 
 
 def _build_instruction_file_context(
@@ -155,16 +172,21 @@ def _build_instruction_file_context(
 
 def _build_workspace_map(scope: WorkspaceScope) -> str | None:
     try:
-        entries = scope.inspect(".", max_entries=_MAX_WORKSPACE_MAP_ENTRIES)
+        entries = scope.inspect(".", max_entries=_MAX_WORKSPACE_MAP_ENTRIES + 1)
     except (OSError, ValueError) as exc:
         return f"Workspace file map unavailable: {exc}"
     if not entries:
         return "Workspace file map: empty workspace"
+    reached_cap = len(entries) > _MAX_WORKSPACE_MAP_ENTRIES
+    if reached_cap:
+        entries = entries[:_MAX_WORKSPACE_MAP_ENTRIES]
     lines = [
         f"Workspace file map (first {len(entries)} visible entries; ignored paths omitted):"
     ]
     for entry in entries:
         lines.append(f"- {entry.path} ({entry.size} bytes)")
+    if reached_cap:
+        lines.append(f"[workspace map capped at {_MAX_WORKSPACE_MAP_ENTRIES} entries by cocoa]")
     return "\n".join(lines)
 
 
@@ -288,7 +310,10 @@ def _referenced_directory_context_item(
     turn_id: str,
     relative: str,
 ) -> tuple[ItemRecord, str]:
-    entries = scope.inspect(relative, max_entries=_MAX_WORKSPACE_MAP_ENTRIES)
+    entries = scope.inspect(relative, max_entries=_MAX_WORKSPACE_MAP_ENTRIES + 1)
+    reached_cap = len(entries) > _MAX_WORKSPACE_MAP_ENTRIES
+    if reached_cap:
+        entries = entries[:_MAX_WORKSPACE_MAP_ENTRIES]
     payload_entries = [{"path": entry.path, "size": entry.size} for entry in entries]
     item = ItemRecord(
         id=new_id("item"),
@@ -306,6 +331,6 @@ def _referenced_directory_context_item(
     lines = [f"@{relative}/ directory listing:"]
     for entry in entries:
         lines.append(f"- {entry.path} ({entry.size} bytes)")
-    if len(entries) >= _MAX_WORKSPACE_MAP_ENTRIES:
+    if reached_cap:
         lines.append(f"- ... capped at {_MAX_WORKSPACE_MAP_ENTRIES} entries")
     return item, "\n".join(lines)

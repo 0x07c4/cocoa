@@ -1200,6 +1200,264 @@ class RuntimeTests(unittest.TestCase):
             warning = routing["payload"].get("budget_warning")
             self.assertIsNone(warning)
 
+    def test_runtime_includes_claude_md_as_instruction_file(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "CLAUDE.md").write_text(
+                "# Claude Instructions\n\nRespond in French.\n", encoding="utf-8"
+            )
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "hello"))
+
+            request = provider.requests[-1]
+            self.assertIsNotNone(request.workspace_context)
+            self.assertIn("Instruction file:", request.workspace_context or "")
+            self.assertIn("CLAUDE.md", request.workspace_context or "")
+            self.assertIn("Respond in French.", request.workspace_context or "")
+
+    def test_runtime_both_agents_and_claude_md_are_included(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "AGENTS.md").write_text("Agent rules.\n", encoding="utf-8")
+            (tmp_path / "CLAUDE.md").write_text("Claude rules.\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "hello"))
+
+            request = provider.requests[-1]
+            context = request.workspace_context or ""
+            self.assertIn("AGENTS.md", context)
+            self.assertIn("Agent rules.", context)
+            self.assertIn("CLAUDE.md", context)
+            self.assertIn("Claude rules.", context)
+
+    def test_runtime_rejects_ignored_path_reference(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            ignored_dir = tmp_path / "node_modules"
+            ignored_dir.mkdir()
+            (ignored_dir / "dep.js").write_text("ignored", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(
+                runtime.run_user_turn_with_result(thread, "show @node_modules/dep.js")
+            )
+
+            self.assertEqual(len(result.context_items), 1)
+            item = result.context_items[0]
+            self.assertEqual(item.kind, "file_read")
+            self.assertEqual(item.status, "failed")
+            self.assertIn("ignored", item.content.get("error", ""))
+            context = provider.requests[-1].workspace_context or ""
+            self.assertIn("unavailable", context)
+            self.assertIn("ignored", context)
+
+    def test_runtime_rejects_out_of_workspace_path_reference(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "test").mkdir()
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(
+                runtime.run_user_turn_with_result(thread, "read @test/../../etc/passwd")
+            )
+
+            self.assertEqual(len(result.context_items), 1)
+            item = result.context_items[0]
+            self.assertEqual(item.kind, "file_read")
+            self.assertEqual(item.status, "failed")
+            self.assertIn("unavailable", provider.requests[-1].workspace_context or "")
+
+    def test_runtime_rejects_binary_path_reference(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "binary.bin").write_bytes(b"\x00\x01\x02\x03")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(
+                runtime.run_user_turn_with_result(thread, "show @binary.bin")
+            )
+
+            self.assertEqual(len(result.context_items), 1)
+            item = result.context_items[0]
+            self.assertEqual(item.kind, "file_read")
+            self.assertEqual(item.status, "failed")
+            context = provider.requests[-1].workspace_context or ""
+            self.assertIn("unavailable", context)
+            self.assertIn("binary", context)
+
+    def test_runtime_records_directory_path_reference_as_inspect(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            (tmp_path / "data").mkdir()
+            (tmp_path / "data" / "a.txt").write_text("a\n", encoding="utf-8")
+            (tmp_path / "data" / "b.txt").write_text("b\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(
+                runtime.run_user_turn_with_result(thread, "list @data")
+            )
+
+            self.assertEqual(len(result.context_items), 1)
+            item = result.context_items[0]
+            self.assertEqual(item.kind, "workspace_inspect")
+            self.assertEqual(item.status, "completed")
+            self.assertEqual(item.content["path"], "data")
+            entries = item.content.get("entries", [])
+            self.assertGreaterEqual(len(entries), 2)
+            paths = [e["path"] for e in entries]
+            self.assertIn("data/a.txt", paths)
+            self.assertIn("data/b.txt", paths)
+            context = provider.requests[-1].workspace_context or ""
+            self.assertIn("data/", context)
+            self.assertIn("directory listing", context)
+
+    def test_runtime_caps_path_references_and_adds_skipped_marker(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            for i in range(10):
+                (tmp_path / f"file{i}.txt").write_text(f"content{i}\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            refs = " ".join(f"@file{i}.txt" for i in range(10))
+            result = asyncio.run(
+                runtime.run_user_turn_with_result(thread, f"read {refs}")
+            )
+
+            context = provider.requests[-1].workspace_context or ""
+            self.assertIn("skipped", context)
+            self.assertIn("additional @path reference(s)", context)
+            # 6 references max (_MAX_CONTEXT_REFERENCES) + 7th gets skipped text
+            self.assertLessEqual(len(result.context_items), 6)
+
+    def test_runtime_truncates_large_git_status(self) -> None:
+        from tempfile import TemporaryDirectory
+        import subprocess
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@test"], cwd=tmp_path, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+            # Create 45 untracked files to exceed the 40-line git status cap
+            for i in range(45):
+                (tmp_path / f"file{i}.py").write_text("x\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "status?"))
+
+            context = provider.requests[-1].workspace_context or ""
+            self.assertIn("Git status:", context)
+            self.assertIn("git status truncated by cocoa", context)
+
+    def test_runtime_truncates_large_workspace_map(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            # Create 85 files to exceed the 80-entry workspace map cap
+            for i in range(85):
+                (tmp_path / f"file{i}.txt").write_text("x\n", encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "show map"))
+
+            context = provider.requests[-1].workspace_context or ""
+            self.assertIn("Workspace file map", context)
+            self.assertIn("workspace map capped", context)
+            self.assertIn("file0.txt", context)
+            self.assertNotIn("file84.txt", context)
+
+    def test_runtime_truncates_large_instruction_file(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            # Write an AGENTS.md larger than 32KB
+            large_content = "# AGENTS\n\n" + ("x" * 35_000) + "\n# END\n"
+            (tmp_path / "AGENTS.md").write_text(large_content, encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            asyncio.run(runtime.run_user_turn(thread, "follow instructions"))
+
+            context = provider.requests[-1].workspace_context or ""
+            self.assertIn("Instruction file:", context)
+            self.assertIn("first", context)
+            self.assertIn("32000 bytes", context)
+            self.assertIn("AGENTS", context)
+            self.assertNotIn("END", context)
+
+    def test_runtime_truncates_large_path_reference(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            # Write a file larger than 32KB
+            large_content = "start\n" + ("x" * 35_000) + "\nend\n"
+            (tmp_path / "large.py").write_text(large_content, encoding="utf-8")
+            store = JsonlStore.for_workspace(tmp_path)
+            provider = CapturingProvider()
+            runtime = AgentRuntime(store, provider)
+            thread = runtime.start_thread(tmp_path)
+
+            result = asyncio.run(
+                runtime.run_user_turn_with_result(thread, "read @large.py")
+            )
+
+            self.assertEqual(len(result.context_items), 1)
+            item = result.context_items[0]
+            self.assertTrue(item.content.get("truncated"))
+            context = provider.requests[-1].workspace_context or ""
+            self.assertIn("first", context)
+            self.assertIn("32000 bytes", context)
+            self.assertIn("start", context)
+            self.assertNotIn("end", context)
+
     def test_runtime_no_budget_warning_when_no_budget_configured(self) -> None:
         from tempfile import TemporaryDirectory
 
